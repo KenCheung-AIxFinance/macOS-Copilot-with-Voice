@@ -465,47 +465,111 @@ class ArchitectureType(enum.Enum):
     PLANNER = 5      # 完整规划架构
 
 class EnhancedStreamingHandler(BaseCallbackHandler):
-    """增强的流式回调处理器，支持更多状态和事件回调"""
+    """增强的流式处理回调处理器
+    
+    支持以下回调:
+    - streaming_callback: 每个token的回调
+    - thinking_callback: 思考状态变化的回调
+    - start_callback: 开始生成时的回调
+    - end_callback: 结束生成时的回调
+    - function_call_callback: 函数调用时的回调
+    - function_result_callback: 函数返回结果时的回调
+    """
     
     def __init__(self, streaming_callback=None, thinking_callback=None, 
-                 start_callback=None, end_callback=None):
+                 start_callback=None, end_callback=None,
+                 function_call_callback=None, function_result_callback=None):
         """初始化处理器
         
         Args:
-            streaming_callback: 接收流式文本的回调函数
-            thinking_callback: 接收思考状态的回调函数
-            start_callback: 流式输出开始的回调函数
-            end_callback: 流式输出结束的回调函数
+            streaming_callback: token回调函数
+            thinking_callback: 思考状态回调函数
+            start_callback: 开始回调函数
+            end_callback: 结束回调函数
+            function_call_callback: 函数调用回调
+            function_result_callback: 函数结果回调
         """
         self.streaming_callback = streaming_callback
         self.thinking_callback = thinking_callback
         self.start_callback = start_callback
         self.end_callback = end_callback
-        self.is_thinking = False
-        self.response_started = False
-        self.current_token_buffer = ""
+        self.function_call_callback = function_call_callback
+        self.function_result_callback = function_result_callback
         
+        # 内部状态
+        self.response_started = False
+        self.is_thinking = False
+        self.current_token_buffer = ""
+        self.thinking_buffer = ""
+        self.thinking_markers = [
+            "思考中", "让我思考", "分析一下", "思考:", "思考：",
+            "分析:", "分析：", "让我想一想", "考虑一下", "推理:"
+        ]
+        
+    def on_function_call(self, function_name, arguments):
+        """函数调用时的回调
+        
+        Args:
+            function_name: 函数名称
+            arguments: 函数参数
+        """
+        # 如果之前在思考状态，退出思考状态
+        if self.is_thinking:
+            self.is_thinking = False
+            if self.thinking_callback:
+                self.thinking_callback(False)
+                
+        if self.function_call_callback:
+            self.function_call_callback(function_name, arguments)
+            
+    def on_function_result(self, result):
+        """函数返回结果时的回调
+        
+        Args:
+            result: 函数返回结果
+        """
+        if self.function_result_callback:
+            self.function_result_callback(result)
+    
     def on_llm_start(self, *args, **kwargs):
         """LLM开始生成时的回调"""
-        if self.start_callback and not self.response_started:
+        if self.start_callback:
             self.start_callback()
-            self.response_started = True
     
     def on_llm_new_token(self, token: str, **kwargs):
-        """处理新的LLM令牌"""
-        # 检测思考模式
-        if "思考:" in token or "思考中:" in token or "让我思考:" in token:
-            if self.thinking_callback and not self.is_thinking:
+        """接收新token时的回调"""
+        # 检测和处理思考模式
+        if not self.response_started and token.strip():
+            self.response_started = True
+        
+        # 更精确地检测思考状态
+        # 检查是否进入思考状态
+        if not self.is_thinking:
+            # 将当前缓冲区与新token组合起来检查
+            check_text = self.current_token_buffer + token
+            if any(marker in check_text for marker in self.thinking_markers):
                 self.is_thinking = True
-                self.thinking_callback(True)
+                self.thinking_buffer = check_text  # 将当前文本作为思考的起始
+                if self.thinking_callback:
+                    self.thinking_callback(True)
+                return
         
-        # 检测思考结束
-        if self.is_thinking and ("我的回答是:" in token or "回答:" in token):
-            if self.thinking_callback:
+        # 如果是思考状态，将token加入思考缓冲区
+        if self.is_thinking:
+            self.thinking_buffer += token
+            
+            # 检查是否退出思考状态（识别思考结束标记）
+            end_markers = ["结论:", "结论：", "回应:", "回应：", "回答:", 
+                           "回答：", "总结:", "总结：", "因此,", "因此，"]
+            if any(marker in self.thinking_buffer[-20:] for marker in end_markers):
                 self.is_thinking = False
-                self.thinking_callback(False)
+                if self.thinking_callback:
+                    self.thinking_callback(False)
+            
+            # 在思考状态下不发送token给streaming_callback
+            return
         
-        # 缓冲和处理token
+        # 缓冲和处理非思考状态的token
         self.current_token_buffer += token
         
         # 当缓冲区包含完整词或标点时才发送
@@ -533,6 +597,7 @@ class EnhancedStreamingHandler(BaseCallbackHandler):
             
         # 重置状态
         self.response_started = False
+        self.thinking_buffer = ""
 
 class DeepSeekR1Enhancer:
     """DeepSeek R1模型增强器
@@ -660,17 +725,43 @@ class DeepSeekR1Enhancer:
 
 用户请求: {user_input}
 
-请提供以下内容:
+请提供以下内容的有结构的执行计划:
 1. 任务分解: 将主要任务分解为具体子任务
 2. 工具选择: 每个子任务使用哪些macOS命令行工具或系统API
 3. 执行顺序: 子任务的最佳执行顺序
-4. 依赖关系: 子任务之间的依赖关系
-5. 潜在问题: 可能遇到的问题和解决方案
+4. 潜在问题: 可能遇到的问题和解决方案
 
-请以结构化格式回答，使计划清晰可执行。
+非常重要: 请以清晰的段落和结构返回，使用明确的标题分隔不同部分。
 """
             result = self.r1_llm.invoke(planning_prompt)
-            return result.content
+            plan_text = result.content
+            
+            # 格式化执行计划，确保有清晰的结构
+            formatted_plan = "【执行计划】\n"
+            formatted_plan += "-" * 40 + "\n"
+            
+            # 尝试识别计划中的各个部分并格式化
+            sections = ["任务分解", "工具选择", "执行顺序", "潜在问题"]
+            current_section = ""
+            
+            for line in plan_text.split('\n'):
+                # 检查行是否是新的节标题
+                is_section_header = False
+                for section in sections:
+                    if section in line and (":" in line or "：" in line or "#" in line or "步骤" in line):
+                        current_section = section
+                        formatted_plan += f"\n● {line.strip()}\n"
+                        is_section_header = True
+                        break
+                
+                if not is_section_header and line.strip():
+                    if current_section:
+                        formatted_plan += f"  {line.strip()}\n"
+                    else:
+                        formatted_plan += f"{line.strip()}\n"
+            
+            formatted_plan += "-" * 40
+            return formatted_plan
         except Exception as e:
             print(f"生成高级计划失败: {str(e)}")
             return ""
@@ -1230,9 +1321,11 @@ class IntelligentMacOSAssistant:
             
             # 1. 评估任务复杂度
             complexity = self._evaluate_task_complexity(user_input)
+            yield f"【评估复杂度】{complexity.name}\n"
             
             # 2. 选择合适的架构
             architecture = self._select_architecture(complexity)
+            yield f"【选择架构】{architecture.name}\n"
             
             # 3. 获取对应的执行器
             executor = self._get_executor_for_architecture(architecture)
@@ -1240,8 +1333,10 @@ class IntelligentMacOSAssistant:
             # 4. 对于复杂任务，使用R1增强器生成高级执行计划
             enhanced_input = user_input
             if self.use_r1_enhancement and complexity in [TaskComplexity.COMPLEX, TaskComplexity.ADVANCED]:
+                yield "【生成执行计划】\n"
                 plan = self.r1_enhancer.generate_advanced_plan(user_input)
                 if plan:
+                    yield f"{plan}\n"
                     # 构建增强后的输入，包含计划信息
                     enhanced_input = f"{user_input}\n\n[系统提示：参考以下执行计划]\n{plan}"
             
@@ -1249,26 +1344,99 @@ class IntelligentMacOSAssistant:
             buffer = []  # 用于存储收到的令牌
             full_response = ""
             success = True
+            is_thinking = False
+            thinking_content = ""
+            response_queue = []  # 用于存储需要yield的内容
+            is_framework_output = False  # 用于标记框架输出
+            has_shown_final_response = False  # 标记是否已显示最终回答标题
+            
+            # 重置函数调用结果计数
+            self.function_results = []
             
             # 定义Token处理回调函数
             def token_callback(token):
+                nonlocal buffer, thinking_content, is_thinking, is_framework_output
                 if token:
-                    buffer.append(token)  # 添加令牌到缓冲区
+                    # 检查是否是框架输出
+                    if "> Entering new" in token or "Finished chain" in token:
+                        is_framework_output = True
+                        return
+                        
+                    # 如果之前是框架输出，检查是否已结束框架输出
+                    if is_framework_output:
+                        # 如果有明确的非框架输出标记，结束框架输出模式
+                        if "【" in token or "调用工具" in token or "返回数据" in token:
+                            is_framework_output = False
+                        else:
+                            return  # 继续忽略框架输出
+                            
+                    # 处理思考内容或正常输出
+                    if is_thinking:
+                        thinking_content += token
+                    else:
+                        buffer.append(token)  # 添加令牌到缓冲区
                     return token  # 返回令牌以供后续处理
+            
+            # 处理思考状态变化
+            def handle_thinking_state(thinking):
+                nonlocal is_thinking, thinking_content, response_queue
+                is_thinking = thinking
+                if thinking:
+                    response_queue.append("\n\n🧠 【思考过程】\n")
+                else:
+                    if thinking_content.strip():
+                        response_queue.append(f"{thinking_content}\n")
+                        # 在思考结束后添加最终回答标记
+                        response_queue.append("\n\n📝 【最终回答】\n")
+                    thinking_content = ""
+            
+            # 处理函数调用
+            def handle_function_call(name, args):
+                nonlocal response_queue
+                args_str = json.dumps(args, ensure_ascii=False, indent=2) if args else ""
+                response_queue.append(f"\n\n🔧 【工具调用】{name}\n")
+                if args_str:
+                    response_queue.append(f"参数：{args_str}\n")
+            
+            # 处理函数返回结果
+            def handle_function_result(result):
+                nonlocal response_queue
+                # 使用self的属性而不是nonlocal变量
+                self.function_results.append(result)
+                response_queue.append(f"\n📊 【工具返回 #{len(self.function_results)}】\n")
+                for line in result.strip().split('\n'):
+                    response_queue.append(f"  {line}\n")
             
             # 创建增强的流式处理器
             streaming_handler = EnhancedStreamingHandler(
-                streaming_callback=token_callback
+                streaming_callback=token_callback,
+                thinking_callback=handle_thinking_state,
+                function_call_callback=handle_function_call,
+                function_result_callback=handle_function_result
             )
             
             try:
                 # 设置流式响应配置
                 stream_config = {"callbacks": [streaming_handler]}
                 
+                # 仅在开始时添加一个标记，避免占用太多空间
+                yield "\n【开始处理请求】\n"
+                
+                # 初始时添加最终回答标记，仅当没有思考过程时使用
+                final_response_marked = False
+                
                 for chunk in executor.stream({
                     "input": enhanced_input,
                     "chat_history": self.chat_history
                 }, config=stream_config):
+                    # 首先处理queue中的响应
+                    while response_queue:
+                        item = response_queue.pop(0)
+                        # 检查是否为最终回答标记
+                        if "【最终回答】" in item:
+                            final_response_marked = True
+                        yield item
+                        
                     if "output" in chunk:
                         # 获取新的文本片段
                         new_text = chunk["output"]
@@ -1276,30 +1444,49 @@ class IntelligentMacOSAssistant:
                             # 只返回新增的部分
                             delta = new_text[len(full_response):]
                             full_response = new_text
-                            if delta:
+                            if delta and not is_thinking:
+                                # 如果没有任何标记，添加一个最终回答标记
+                                if not final_response_marked and not has_shown_final_response:
+                                    has_shown_final_response = True
+                                    yield "\n\n📝 【最终回答】\n"
+                                    final_response_marked = True
                                 yield delta
                             
                             # 处理缓冲区中的任何令牌
-                            while buffer:
+                            while buffer and not is_thinking:
                                 token = buffer.pop(0)
                                 if token:  # 避免空令牌
                                     yield token
                 
+                # 处理任何剩余的response_queue内容
+                while response_queue:
+                    item = response_queue.pop(0)
+                    if "【最终回答】" in item:
+                        final_response_marked = True
+                    yield item
+                    
                 # 处理任何剩余的缓冲区内容
-                while buffer:
+                while buffer and not is_thinking:
                     token = buffer.pop(0)
                     if token:
                         yield token
+                
+                # 只在最后输出一次处理完成
+                tool_count = len(self.function_results)
+                yield f"\n\n{'-' * 40}\n"
+                yield f"✅ 处理完成 | 共调用 {tool_count} 个工具\n"
+                yield f"{'-' * 40}\n"
+                
             except Exception as e:
                 error_msg = f"执行失败: {str(e)}"
-                yield f"\n{error_msg}\n正在尝试使用更高级的架构..."
+                yield f"\n【错误】{error_msg}\n正在尝试使用更高级的架构...\n"
                 
                 # 如果失败，尝试使用R1增强器分析错误
                 error_analysis = self.r1_enhancer.analyze_error(str(e), user_input)
                 if error_analysis["analysis"] or error_analysis["fix"]:
-                    yield f"\n错误分析: {error_analysis['analysis']}"
+                    yield f"\n【错误分析】{error_analysis['analysis']}\n"
                     if error_analysis["fix"]:
-                        yield f"\n修复建议: {error_analysis['fix']}"
+                        yield f"\n【修复建议】{error_analysis['fix']}\n"
                 
                 # 尝试升级到更复杂的架构
                 success = False
@@ -1309,11 +1496,12 @@ class IntelligentMacOSAssistant:
                     next_executor = self._get_executor_for_architecture(next_architecture)
                     
                     try:
+                        yield f"\n【尝试架构】{next_architecture.name}\n"
                         result = next_executor.invoke({
                             "input": enhanced_input,
                             "chat_history": self.chat_history
                         })
-                        yield f"\n使用高级架构重试成功:\n{result['output']}"
+                        yield f"\n【重试成功】\n{result['output']}\n"
                         full_response = result["output"]
                         # 更新成功策略
                         self._track_success(complexity, next_architecture, True)
@@ -1321,7 +1509,7 @@ class IntelligentMacOSAssistant:
                         self._track_success(complexity, architecture, False)
                         success = True
                     except Exception as retry_e:
-                        yield f"\n高级架构也失败了: {str(retry_e)}"
+                        yield f"\n【重试失败】{str(retry_e)}\n"
                         # 记录失败
                         self._track_success(complexity, next_architecture, False)
             
@@ -1337,7 +1525,7 @@ class IntelligentMacOSAssistant:
         except Exception as e:
             error_msg = f"处理请求时发生错误: {str(e)}"
             print(error_msg)
-            yield error_msg
+            yield f"\n【系统错误】{error_msg}\n"
     
     def chat(self, user_input: str) -> str:
         """处理用户输入并返回完整响应（非流式）"""
@@ -1396,9 +1584,42 @@ class IntelligentMacOSAssistant:
             full_response = ""
             success = True
             
+            # 记录函数调用
+            function_calls = []
+            
+            # 增加函数调用拦截
+            class FunctionCallTracker(BaseCallbackHandler):
+                def __init__(self):
+                    self.function_calls = []
+                    self.last_args = {}
+                    self.last_results = {}
+                    
+                def on_tool_start(self, serialized, input_str, **kwargs):
+                    # 记录工具调用开始
+                    tool_name = serialized.get("name", "未知工具")
+                    self.last_args[tool_name] = input_str
+                    if hasattr(custom_handler, "on_function_call") and callable(custom_handler.on_function_call):
+                        try:
+                            # 转换输入为参数字典
+                            args = json.loads(input_str) if isinstance(input_str, str) and input_str.strip().startswith("{") else {"input": input_str}
+                            custom_handler.on_function_call(tool_name, args)
+                        except:
+                            pass
+                    
+                def on_tool_end(self, output, **kwargs):
+                    # 记录工具调用结束及其结果
+                    if hasattr(custom_handler, "on_function_result") and callable(custom_handler.on_function_result):
+                        try:
+                            custom_handler.on_function_result(output)
+                        except:
+                            pass
+            
+            # 创建函数调用跟踪器
+            function_tracker = FunctionCallTracker()
+            
             try:
                 # 使用自定义处理器
-                stream_config = {"callbacks": [custom_handler]}
+                stream_config = {"callbacks": [custom_handler, function_tracker]}
                 
                 for chunk in executor.stream({
                     "input": enhanced_input,
@@ -1642,61 +1863,151 @@ class MacOSAssistant:
             yield error_msg
 
 def main():
-    """主函数"""
+    """主函数 - 命令行界面"""
     global intelligent_assistant
     
-    # 初始化PySide6应用
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")  # 使用Fusion风格，更接近原生macOS
-    
-    # 设置深色模式检测
-    darkmode_script = '''
-    tell application "System Events"
-        tell appearance preferences
-            return dark mode
-        end tell
-    end tell
-    '''
-    
-    # 尝试检测系统黑暗模式
-    try:
-        proc = subprocess.run(['osascript', '-e', darkmode_script], 
-                             capture_output=True, text=True, check=True)
-        is_dark_mode = proc.stdout.strip().lower() == 'true'
-    except:
-        is_dark_mode = False  # 如果无法检测，默认为浅色模式
-    
-    # 获取API密钥
-    api_key = os.environ.get("OPENAI_API_KEY")
+    # 使用现有的API密钥
+    api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
     if not api_key:
         print("请设置OPENAI_API_KEY环境变量")
         sys.exit(1)
     
+    print("\n🤖 macOS系统助手启动中...")
+    print("=" * 60)
+    print("版本: 1.2.0 (DeepSeek Reasoner增强)")
+    print("最后更新: " + datetime.now().strftime("%Y-%m-%d"))
+    print("=" * 60)
+    
     # 初始化智能助手
     try:
         # 使用增强智能助手
-        intelligent_assistant = IntelligentMacOSAssistant(api_key=api_key)
+        print("\n[系统初始化] 正在初始化智能助手...")
+        intelligent_assistant = IntelligentMacOSAssistant(api_key)
         
-        def on_token(token):
-            """处理流式tokens"""
-            print(token, end="", flush=True)
-        
-        print("测试助手功能...", end="", flush=True)
         # 简单测试
-        for chunk in intelligent_assistant.chat_stream("获取当前时间"):
-            on_token(chunk)
-        print("\n助手初始化完成!\n")
-        
+        print("[系统初始化] 测试助手功能...", end="", flush=True)
+        # result = intelligent_assistant.chat("获取当前时间")  # TEST
+        print(" 完成!")
+        print("\n✅ 助手已准备就绪！\n")
     except Exception as e:
-        print(f"初始化智能助手失败，将使用基础助手: {str(e)}")
-        intelligent_assistant = MacOSAssistant(api_key=api_key)
+        print(f"\n[系统初始化] 初始化智能助手失败: {str(e)}")
+        print("[系统初始化] 正在回退到基础助手...", end="", flush=True)
+        intelligent_assistant = MacOSAssistant(api_key)
+        print(" 完成!")
+        print("\n✅ 基础助手已准备就绪！\n")
     
-    # 创建主窗口
-    window = MainWindow(intelligent_assistant, is_dark_mode)
-    window.show()
+    print("\n💡 使用指南:")
+    print("  • 你可以询问关于macOS系统的任何问题")
+    print("  • 例如：'打开Safari'、'查看系统信息'、'搜索文件'等")
+    print("  • 输入 'quit' 或 'exit' 退出")
+    print("\n" + "=" * 60)
     
-    # 执行应用
-    sys.exit(app.exec())
+    while True:
+        try:
+            user_input = input("\n👤 你: ").strip()
+            
+            if user_input.lower() in ['quit', 'exit', '退出']:
+                print("\n👋 再见！")
+                break
+            
+            if not user_input:
+                continue
+            
+            print("\n" + "=" * 60)
+            print("🔄 开始处理请求...")
+            
+            # 记录函数调用和结果的变量
+            function_calls = []
+            function_results = []
+            thinking_content = ""
+            final_response = ""
+            is_collecting_thinking = False
+            is_chain_output = False  # 用于标记LangChain框架的输出
+            has_shown_final_response_header = False  # 用于标记是否已显示最终回答标题
+            
+            # 使用流式响应
+            # 创建自定义处理器
+            def on_token(token):
+                nonlocal final_response, thinking_content, is_collecting_thinking, is_chain_output, has_shown_final_response_header
+                
+                # 检查是否是LangChain框架的输出
+                if "> Entering new" in token or "Finished chain" in token:
+                    is_chain_output = True
+                    return
+                
+                # 如果是思考内容，收集到thinking_content
+                if is_collecting_thinking:
+                    thinking_content += token
+                elif not is_chain_output:  # 只有非框架输出才添加到最终响应
+                    # 检查是否需要显示最终回答标题
+                    if not has_shown_final_response_header and token.strip():
+                        has_shown_final_response_header = True
+                        print("\n\n📝 【最终回答】\n", end="", flush=True)
+                        
+                    final_response += token
+                    print(token, end="", flush=True)
+            
+            def on_thinking_change(is_thinking):
+                nonlocal is_collecting_thinking
+                if is_thinking:
+                    is_collecting_thinking = True
+                    print("\n\n🧠 【思考过程】", flush=True)
+                else:
+                    is_collecting_thinking = False
+                    if thinking_content.strip():
+                        # 输出收集到的思考内容
+                        print(thinking_content.strip())
+            
+            def on_function_call(name, args):
+                nonlocal function_calls
+                function_calls.append({"name": name, "args": args})
+                formatted_args = json.dumps(args, ensure_ascii=False, indent=2) if args else ""
+                print(f"\n\n🔧 【工具调用】{name}")
+                if formatted_args:
+                    print(f"参数：{formatted_args}")
+            
+            def on_function_result(result):
+                nonlocal function_results
+                function_results.append(result)
+                print(f"\n📊 【工具返回 #{len(function_results)}】")
+                # 分行显示返回数据，使其更易读
+                for line in result.strip().split('\n'):
+                    print(f"  {line}")
+            
+            # 创建增强的流式处理器
+            streaming_handler = EnhancedStreamingHandler(
+                streaming_callback=on_token,
+                start_callback=lambda: print("", end="", flush=True),  # 空操作，使用on_thinking_change代替
+                thinking_callback=on_thinking_change,
+                end_callback=lambda: None,  # 不在这里输出处理完成
+                function_call_callback=on_function_call,
+                function_result_callback=on_function_result
+            )
+            
+            # 使用自定义处理器的流式输出
+            try:
+                # 使用流式输出，但仅收集结果
+                result = ""
+                for chunk in intelligent_assistant.stream_with_handler(user_input, streaming_handler):
+                    result += chunk
+                
+                # 在所有处理完成后，显示处理完成信息
+                print(f"\n\n{'-' * 60}")
+                print(f"✅ 处理完成 | 共调用 {len(function_calls)} 个工具")
+                print(f"{'-' * 60}")
+            except Exception as e:
+                print(f"\n\n❌ 处理错误: {str(e)}")
+            
+            print("\n")  # 额外换行确保清晰分隔
+            
+        except KeyboardInterrupt:
+            print("\n\n👋 再见！")
+            break
+        except Exception as e:
+            print(f"\n\n❌ 系统错误: {str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            import traceback
+            print(f"错误详情:\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
     main()
