@@ -12,14 +12,12 @@ from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QTextCursor, QTextOption
 import speech_recognition as sr
 import edge_tts
 import asyncio
+from openai import OpenAI
 import os
 import tempfile
 from langdetect import detect, DetectorFactory
 import re
 import markdown
-import json
-from enum import Enum
-import time
 
 # 导入我们的macOS助手
 from agent import IntelligentMacOSAssistant, ArchitectureType, TaskComplexity, EnhancedStreamingHandler
@@ -34,9 +32,6 @@ class WorkerSignals(QObject):
     stream_start = pyqtSignal()     # 流式输出开始信号
     stream_end = pyqtSignal()       # 流式输出结束信号
     stream_thinking = pyqtSignal(bool)  # 流式思考状态信号（用于显示思考指示器）
-    
-    # 新增事件信号
-    process_event = pyqtSignal(dict)  # 处理事件信号，用于可视化流程
 
 class AudioWorker(QThread):
     """处理音频识别的工作线程"""
@@ -175,10 +170,6 @@ class StreamingAssistantWorker(QThread):
         
         # 流式处理器配置
         self.streaming_handler = None
-        
-        # 跟踪处理事件
-        self.current_event_type = None
-        self.event_buffer = ""
 
     def stop(self):
         """停止流式输出处理"""
@@ -192,7 +183,7 @@ class StreamingAssistantWorker(QThread):
             # 创建增强的流式处理器
             self.streaming_handler = EnhancedStreamingHandler(
                 streaming_callback=lambda token: self.handle_token(token),
-                thinking_callback=lambda is_thinking: self.handle_thinking_state(is_thinking),
+                thinking_callback=lambda is_thinking: self.signals.stream_thinking.emit(is_thinking),
                 start_callback=lambda: self.signals.stream_start.emit(),
                 end_callback=lambda: self.signals.stream_end.emit()
             )
@@ -202,12 +193,10 @@ class StreamingAssistantWorker(QThread):
             
             # 如果assistant有自定义的stream_with_handler方法，使用它
             if hasattr(self.assistant, 'stream_with_handler'):
+                # 这是一个假设的方法，实际上需要在agent.py中实现
                 for chunk in self.assistant.stream_with_handler(self.user_input, self.streaming_handler):
                     if not self.active:
                         break  # 如果被停止则中断处理
-                    
-                    # 处理事件标记
-                    self.process_event_marker(chunk)
                     
                     full_response += chunk
             else:
@@ -215,9 +204,6 @@ class StreamingAssistantWorker(QThread):
                 for chunk in self.assistant.chat_stream(self.user_input):
                     if not self.active:
                         break  # 如果被停止则中断处理
-                    
-                    # 处理事件标记
-                    self.process_event_marker(chunk)
                     
                     full_response += chunk
                     # 发送单个文本块
@@ -236,112 +222,14 @@ class StreamingAssistantWorker(QThread):
             self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit()
-    
+            
     def handle_token(self, token):
         """处理从增强流式处理器收到的单个令牌"""
         if not self.active:
             return
         
-        # 发送文本块到UI
+        # 发送文本块
         self.signals.stream_chunk.emit(token)
-    
-    def handle_thinking_state(self, is_thinking):
-        """处理思考状态变化"""
-        self.signals.stream_thinking.emit(is_thinking)
-        
-        # 如果开始思考，并且没有当前事件
-        if is_thinking and not self.current_event_type:
-            self.current_event_type = ProcessEventType.THINKING
-            self.event_buffer = "【思考过程】\n"
-    
-    def process_event_marker(self, chunk):
-        """处理事件标记"""
-        # 检查是否有事件标记
-        event_markers = {
-            "【评估复杂度】": ProcessEventType.COMPLEXITY,
-            "【选择架构】": ProcessEventType.ARCHITECTURE,
-            "【生成执行计划】": ProcessEventType.PLAN,
-            "【思考过程】": ProcessEventType.THINKING,
-            "【工具调用】": ProcessEventType.TOOL_CALL,
-            "【工具返回】": ProcessEventType.TOOL_RESULT,
-            "【最终回答】": ProcessEventType.FINAL_ANSWER
-        }
-        
-        # 检查是否开始新事件
-        for marker, event_type in event_markers.items():
-            if marker in chunk:
-                # 结束之前的事件
-                self.finish_current_event()
-                
-                # 开始新事件
-                self.current_event_type = event_type
-                self.event_buffer = chunk
-                return
-        
-        # 继续积累当前事件内容
-        if self.current_event_type:
-            self.event_buffer += chunk
-            
-            # 检查事件是否结束
-            end_markers = {
-                ProcessEventType.COMPLEXITY: "\n",
-                ProcessEventType.ARCHITECTURE: "\n",
-                ProcessEventType.PLAN: "----",
-                ProcessEventType.THINKING: "\n\n📝",
-                ProcessEventType.TOOL_CALL: "\n\n",
-                ProcessEventType.TOOL_RESULT: "\n\n",
-                ProcessEventType.FINAL_ANSWER: "\n\n--"
-            }
-            
-            if self.current_event_type in end_markers and end_markers[self.current_event_type] in chunk:
-                self.finish_current_event()
-
-    def finish_current_event(self):
-        """完成当前事件并发送事件信号"""
-        if not self.current_event_type or not self.event_buffer:
-            return
-            
-        # 根据事件类型处理内容
-        content = self.event_buffer.strip()
-        event_data = {
-            "type": self.current_event_type.value,
-            "content": content,
-            "timestamp": time.time()
-        }
-        
-        # 对特定事件类型进行额外处理
-        if self.current_event_type == ProcessEventType.TOOL_CALL:
-            # 尝试提取工具名称和参数
-            tool_name_match = re.search(r"【工具调用】(.+?)[\n\r]", content)
-            if tool_name_match:
-                event_data["tool_name"] = tool_name_match.group(1).strip()
-                
-            # 尝试提取参数
-            params_match = re.search(r"参数：(.+?)$", content, re.DOTALL)
-            if params_match:
-                try:
-                    event_data["parameters"] = params_match.group(1).strip()
-                except:
-                    event_data["parameters"] = "{}"
-        
-        # 发送事件信号
-        self.signals.process_event.emit(event_data)
-        
-        # 清除状态
-        self.current_event_type = None
-        self.event_buffer = ""
-    
-    def handle_token(self, token):
-        """处理从增强流式处理器收到的单个令牌"""
-        if not self.active:
-            return
-        
-        # 发送文本块到UI
-        self.signals.stream_chunk.emit(token)
-    
-    def handle_thinking_state(self, is_thinking):
-        """处理思考状态变化"""
-        self.signals.stream_thinking.emit(is_thinking)
 
 class StatusLabel(QLabel):
     def __init__(self, text, parent=None):
@@ -652,7 +540,7 @@ class ChatBubble(QFrame):
             
         # 调整宽度和滚动位置
         QTimer.singleShot(10, self.adjustWidth)
-    
+        
     def adjustWidth(self):
         """完全自适应文本高度，无滚动条"""
         # 获取文档内容的大小
@@ -783,85 +671,153 @@ class BreathingDotIndicator(QWidget):
 class MacOSAssistantUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("macOS Copilot")
+        self.setWindowTitle('macOS系统助手')
+        self.setGeometry(100, 100, 1600, 900)  # 进一步增加窗口宽度
+        self.setMinimumSize(1300, 700)  # 增加最小窗口大小
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #ffffff;
+            }
+            QTextEdit {
+                background-color: white;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QTextEdit:focus {
+                border: 1px solid #007AFF;
+            }
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #0056CC;
+            }
+            QPushButton:pressed {
+                background-color: #004499;
+            }
+            QListWidget {
+                background-color: white;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                padding: 8px;
+                font-size: 13px;
+                color: #2c3e50;
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            /* 新的滚动条样式 */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 12px;
+                margin: 0px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: #c0c0c0;
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #a0a0a0;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #808080;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            /* 水平滚动条样式 */
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 12px;
+                margin: 0px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #c0c0c0;
+                min-width: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #a0a0a0;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #808080;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+            }
+        """)
         
-        # 设置应用图标
-        self.setWindowIcon(QIcon('icon.png'))
-        
-        # 设置窗口大小和位置
-        screen_size = QApplication.primaryScreen().availableGeometry()
-        window_width = int(screen_size.width() * 0.82)  # 窗口宽度
-        window_height = int(screen_size.height() * 0.82)  # 窗口高度
-        
-        # 以屏幕中心为基准，设置窗口位置
-        window_x = int((screen_size.width() - window_width) / 2)
-        window_y = int((screen_size.height() - window_height) / 2)
-        
-        # 设置窗口大小和位置
-        self.setGeometry(window_x, window_y, window_width, window_height)
-        
-        # 防止窗口太小导致元素叠加
-        self.setMinimumSize(800, 600)
-        
-        # 创建语音识别实例
+        # 初始化语音识别
         self.recognizer = sr.Recognizer()
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.energy_threshold = 300
+        self.recognizer.pause_threshold = 1.0
+        self.recognizer.phrase_threshold = 0.5
+        self.recognizer.non_speaking_duration = 0.8
         
-        # 创建助手 - 不需要API密钥，采用默认参数
-        try:
-            self.assistant = IntelligentMacOSAssistant()
-        except Exception as e:
-            print(f"初始化智能助手失败: {str(e)}")
-            from agent import MacOSAssistant
-            self.assistant = MacOSAssistant()
+        # 初始化macOS智能助手
+        api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
+        self.assistant = IntelligentMacOSAssistant(api_key)
         
-        # TTS控制
-        self.is_tts_enabled = True  # 默认启用TTS
-        self.last_tts_time = 0  # 上次TTS时间
-        
-        # 初始化UI
+        # 创建UI
         self.init_ui()
         
-        # 存储工作线程实例
-        self.audio_worker = None
-        self.tts_worker = None
-        self.assistant_worker = None
-        
-        # 当前聊天气泡
-        self.current_assistant_bubble = None
-        
-        # 存储命令历史
-        self.command_history = []
-        
-        # 定义预设命令
-        self.preset_commands = [
-            "列出当前目录下的文件",
-            "检查系统状态",
-            "查看网络连接",
-            "显示磁盘使用情况",
-            "查询最近系统事件",
-            "提取当前目录下的图片",
-            "搜索大于100MB的文件",
-            "列出所有已安装应用",
-            "获取当前Wi-Fi信息",
-            "分析系统日志",
-            "查询最近修改的文件",
-            "创建文件备份方案",
-            "查找重复文件",
-            "生成系统报告"
-        ]
-        
-        # 创建流程可视化组件
-        self.process_visualizer = ProcessVisualizer(self)
+        # 对话状态
+        self.is_speaking = False
         
         # 启动工作线程
         self.start_workers()
         
-        # 更新预设命令
+        # 默认关闭语音功能
+        self.audio_worker.set_paused(True)  # 默认暂停语音输入
+        
+        # 添加安全延迟防止麦克风冲突
+        self.last_tts_time = 0
+        
+        # 预设命令列表
+        self.preset_commands = [
+            "查看系统信息",
+            "打开Safari",
+            "打开终端",
+            "查看电池状态",
+            "查看网络信息",
+            "查看运行进程",
+            "搜索文件",
+            "设置音量为50%",
+            "创建笔记",
+            "获取当前时间"
+        ]
+        
         self.update_preset_commands()
         
-        # 更新智能度指标
-        self.update_intelligence_indicators()
-    
+        # 当前正在使用的架构
+        self.current_architecture = ArchitectureType.DIRECT
+        self.current_complexity = TaskComplexity.SIMPLE
+        
+        # 定时更新指示器
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_intelligence_indicators)
+        self.update_timer.start(2000)  # 每2秒更新一次
+        
     def init_ui(self):
         # 创建主窗口部件
         central_widget = QWidget()
@@ -1042,74 +998,73 @@ class MacOSAssistantUI(QMainWindow):
     
     def create_chat_area(self):
         """创建聊天区域"""
-        # 聊天容器
-        chat_container = QWidget()
-        chat_layout = QVBoxLayout(chat_container)
-        chat_layout.setContentsMargins(0, 0, 0, 0)
+        self.chat_container = QWidget()
+        self.chat_container.setStyleSheet("""
+            QWidget {
+                background-color: white;
+            }
+        """)
+        
+        chat_layout = QVBoxLayout(self.chat_container)
+        chat_layout.setContentsMargins(24, 24, 24, 24)
         chat_layout.setSpacing(0)
         
-        # 聊天滚动区域
+        # 聊天显示区域
         self.chat_area = QScrollArea()
-        self.chat_area.setWidgetResizable(True)
-        self.chat_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.chat_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
-        # 聊天内容容器
-        self.chat_content = QWidget()
-        self.chat_layout = QVBoxLayout(self.chat_content)
-        self.chat_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.chat_layout.setContentsMargins(0, 0, 0, 0)
-        self.chat_layout.setSpacing(0)
-        
-        # 让聊天内容自动向下拉伸，避免滚动到顶部出现空白区域
-        self.chat_layout.addStretch()
-        
-        # 设置聊天内容到滚动区域
-        self.chat_area.setWidget(self.chat_content)
-        
-        # 添加流程可视化组件到布局
-        chat_layout.addWidget(self.process_visualizer)
-        
-        # 添加聊天区域到布局
-        chat_layout.addWidget(self.chat_area, 1)  # 1表示拉伸因子
-        
-        # 设置为主内容区域
-        self.main_content_layout.addWidget(chat_container, 1)  # 1表示拉伸因子
-        
-        # 设置滚动区域默认样式
         self.chat_area.setStyleSheet("""
             QScrollArea {
-                background-color: #f7f7f7;
+                background-color: #ffffff;
                 border: none;
             }
-            
-            /* 滚动条样式 */
+            /* 自定义聊天区域滚动条 */
             QScrollBar:vertical {
                 background: transparent;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
+                width: 14px;
+                margin: 2px;
+                border-radius: 7px;
             }
-            
             QScrollBar::handle:vertical {
-                background: rgba(160, 160, 160, 0.3);
+                background: rgba(160, 160, 160, 0.5);
                 min-height: 30px;
-                border-radius: 5px;
+                border-radius: 7px;
+                margin: 2px;
             }
-            
             QScrollBar::handle:vertical:hover {
-                background: rgba(160, 160, 160, 0.6);
+                background: rgba(160, 160, 160, 0.8);
             }
-            
+            QScrollBar::handle:vertical:pressed {
+                background: rgba(128, 128, 128, 0.9);
+            }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
-            
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
                 background: none;
             }
         """)
+        
+        # 创建聊天内容容器
+        self.chat_widget = QWidget()
+        self.chat_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, 
+            QSizePolicy.Policy.MinimumExpanding
+        )
+        
+        # 创建聊天布局
+        self.chat_layout = QVBoxLayout(self.chat_widget)
+        self.chat_layout.setSpacing(0)  # 移除消息间距以实现全屏连续布局
+        self.chat_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
+        self.chat_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.chat_layout.addStretch()
+        
+        # 设置滚动区域属性
+        self.chat_area.setWidget(self.chat_widget)
+        self.chat_area.setWidgetResizable(True)
+        self.chat_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.chat_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # 添加滚动区域到聊天容器
+        chat_layout.addWidget(self.chat_area)
     
     def create_input_area(self):
         """创建输入区域"""
@@ -1521,46 +1476,26 @@ class MacOSAssistantUI(QMainWindow):
         QTimer.singleShot(100, lambda: self._process_message(text))
         
     def _process_message(self, text):
-        """处理消息，启动流式助手工作线程"""
-        # 禁用输入
-        self.message_input.setDisabled(True)
-        self.send_button.setDisabled(False)
-        self.send_button.setText(" 处理中... ")
-        self.send_button.setStyleSheet("""
-            QPushButton {
-                background-color: #bdc3c7;
-                color: #2c3e50;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-weight: 600;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #a0a5a9;
-            }
-        """)
+        """异步处理消息，避免阻塞UI"""
+        # 更新状态
+        self.update_status("正在处理...")
         
-        # 更改状态显示
-        self.update_status("处理消息中...")
+        # 在发送前评估任务复杂度
+        if hasattr(self.assistant, '_evaluate_task_complexity'):
+            try:
+                self.current_complexity = self.assistant._evaluate_task_complexity(text)
+                # 根据复杂度选择架构
+                self.current_architecture = self.assistant._select_architecture(self.current_complexity)
+                # 更新显示
+                self.update_intelligence_indicators()
+            except Exception as e:
+                print(f"复杂度评估错误: {str(e)}")
         
-        # 添加用户消息到聊天区域
-        self.add_message("你", text)
-        
-        # 添加空的助手消息气泡
-        self.current_assistant_bubble = self.add_message("AI助手", "", True)
+        # 创建空的助手消息气泡（用于流式更新）
+        self.current_assistant_bubble = self.add_message("助手", "", create_empty=True)
         
         # 启动打字指示器
-        if self.current_assistant_bubble:
-            self.current_assistant_bubble.start_typing_indicator()
-        
-        # 启用输入（让用户可以在处理过程中编辑下一个消息）
-        self.message_input.setDisabled(False)
-        self.message_input.clear()
-        self.message_input.setFocus()
-        
-        # 清除流程可视化组件
-        self.process_visualizer.clear_events()
+        self.current_assistant_bubble.start_typing_indicator()
         
         # 如果存在上一个流式工作线程，停止它
         if hasattr(self, 'assistant_worker') and self.assistant_worker is not None:
@@ -1574,8 +1509,6 @@ class MacOSAssistantUI(QMainWindow):
         self.assistant_worker.signals.stream_end.connect(self.on_stream_end)
         self.assistant_worker.signals.result.connect(self.handle_assistant_response)
         self.assistant_worker.signals.error.connect(self.handle_error)
-        self.assistant_worker.signals.process_event.connect(self.handle_process_event)
-        self.assistant_worker.signals.stream_thinking.connect(self.handle_thinking_indicator)
         self.assistant_worker.start()
     
     def on_stream_start(self):
@@ -1615,12 +1548,6 @@ class MacOSAssistantUI(QMainWindow):
     def handle_stream_chunk(self, chunk):
         """处理流式文本块"""
         if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
-            # 根据段落断点添加额外的空行，使输出更清晰
-            if chunk.endswith('\n') and len(chunk) > 1:
-                # 检测多个换行符序列，将其规范化为最多两个换行符
-                if self.current_assistant_bubble.current_text.endswith('\n'):
-                    chunk = '\n' + chunk.lstrip('\n') 
-            
             self.current_assistant_bubble.append_text(chunk)
             # 滚动到底部以显示最新内容
             QTimer.singleShot(10, self.scroll_to_bottom)
@@ -1947,323 +1874,13 @@ class MacOSAssistantUI(QMainWindow):
         except Exception as e:
             print(f"更新智能指标错误: {str(e)}")
 
-    def handle_process_event(self, event_data):
-        """处理流程事件"""
-        self.process_visualizer.handle_event(event_data)
-
-    def handle_thinking_indicator(self, is_thinking):
-        """处理思考状态指示器"""
-        if is_thinking:
-            # 显示思考指示器
-            if self.current_assistant_bubble:
-                self.current_assistant_bubble.start_typing_indicator()
-        else:
-            # 隐藏思考指示器
-            if self.current_assistant_bubble:
-                self.current_assistant_bubble.stop_typing_indicator()
-
-# 在WorkerSignals类之后添加ProcessEventType枚举类
-class ProcessEventType(Enum):
-    COMPLEXITY = "complexity"  # 复杂度评估
-    ARCHITECTURE = "architecture"  # 架构选择
-    PLAN = "plan"  # 执行计划
-    THINKING = "thinking"  # 思考过程
-    TOOL_CALL = "tool_call"  # 工具调用
-    TOOL_RESULT = "tool_result"  # 工具结果
-    FINAL_ANSWER = "final_answer"  # 最终回答
-
-# 在StreamingAssistantWorker类之后添加ProcessVisualizer类
-class ProcessVisualizer(QWidget):
-    """处理流程可视化组件"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(30)  # 初始仅显示标题栏
-        self.setMaximumHeight(300)  # 最大高度
-        
-        # 组件是否展开
-        self.is_expanded = False
-        
-        # 当前处理事件
-        self.events = []
-        
-        # 创建UI
-        self.create_ui()
-        
-        # 初始隐藏
-        self.hide()
-    
-    def create_ui(self):
-        """创建UI组件"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        
-        # 标题栏
-        header = QWidget()
-        header.setFixedHeight(30)
-        header.setStyleSheet("""
-            background-color: #f0f5ff;
-            border-top: 1px solid #d0d0f0;
-            border-bottom: 1px solid #d0d0f0;
-        """)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(10, 0, 10, 0)
-        
-        # 标题
-        title = QLabel("💡 执行流程")
-        title.setStyleSheet("color: #2060c0; font-size: 13px; font-weight: bold;")
-        
-        # 控制按钮
-        self.toggle_button = QPushButton("▼")
-        self.toggle_button.setFixedSize(24, 24)
-        self.toggle_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e0e8ff;
-                border: 1px solid #c0d0ff;
-                border-radius: 12px;
-                color: #4080f0;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #d0e0ff;
-            }
-        """)
-        self.toggle_button.clicked.connect(self.toggle_expansion)
-        
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        header_layout.addWidget(self.toggle_button)
-        
-        # 内容区域
-        self.content_area = QScrollArea()
-        self.content_area.setWidgetResizable(True)
-        self.content_area.setStyleSheet("""
-            QScrollArea {
-                background-color: #f8faff;
-                border: none;
-            }
-        """)
-        
-        # 内容容器
-        self.content_container = QWidget()
-        self.content_layout = QVBoxLayout(self.content_container)
-        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.content_layout.setSpacing(8)
-        self.content_layout.setContentsMargins(10, 10, 10, 10)
-        
-        self.content_area.setWidget(self.content_container)
-        
-        # 添加到主布局
-        layout.addWidget(header)
-        layout.addWidget(self.content_area, 1)  # 1为拉伸因子
-        
-        # 设置初始高度
-        self.setFixedHeight(30)  # 初始仅显示标题栏
-    
-    def toggle_expansion(self):
-        """切换展开/折叠状态"""
-        if self.is_expanded:
-            # 折叠
-            self.animate_collapse()
-            self.toggle_button.setText("▼")
-        else:
-            # 展开
-            self.animate_expand()
-            self.toggle_button.setText("▲")
-        
-        self.is_expanded = not self.is_expanded
-    
-    def animate_expand(self):
-        """展开动画"""
-        self.animation = QPropertyAnimation(self, b"maximumHeight")
-        self.animation.setDuration(300)
-        self.animation.setStartValue(30)
-        self.animation.setEndValue(300)
-        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.animation.start()
-    
-    def animate_collapse(self):
-        """折叠动画"""
-        self.animation = QPropertyAnimation(self, b"maximumHeight")
-        self.animation.setDuration(300)
-        self.animation.setStartValue(self.height())
-        self.animation.setEndValue(30)
-        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.animation.start()
-    
-    def handle_event(self, event_data):
-        """处理事件"""
-        # 存储事件
-        self.events.append(event_data)
-        
-        # 创建事件卡片
-        event_card = self.create_event_card(event_data)
-        
-        # 添加到内容布局
-        self.content_layout.insertWidget(0, event_card)
-        
-        # 限制最多显示10个事件
-        if self.content_layout.count() > 10:
-            # 删除最旧的事件卡片
-            item = self.content_layout.takeAt(self.content_layout.count() - 1)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        # 显示组件
-        self.show()
-    
-    def create_event_card(self, event_data):
-        """创建事件卡片"""
-        event_type = event_data["type"]
-        content = event_data["content"]
-        
-        # 创建卡片
-        card = QFrame()
-        card.setFrameShape(QFrame.Shape.Box)
-        card.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 0.8);
-                border: 1px solid #e0e8ff;
-                border-radius: 8px;
-                padding: 6px;
-            }
-            QFrame:hover {
-                border: 1px solid #a0c0ff;
-                background-color: rgba(240, 245, 255, 0.9);
-            }
-        """)
-        
-        # 卡片布局
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(8, 6, 8, 6)
-        card_layout.setSpacing(4)
-        
-        # 标题区域
-        title_layout = QHBoxLayout()
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 根据事件类型设置图标和颜色
-        icon, color, title_text = self.get_event_style(event_type)
-        
-        # 图标标签
-        icon_label = QLabel(icon)
-        icon_label.setStyleSheet(f"color: {color}; font-size: 16px;")
-        
-        # 标题标签
-        title_label = QLabel(title_text)
-        title_label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
-        
-        # 添加到标题布局
-        title_layout.addWidget(icon_label)
-        title_layout.addWidget(title_label)
-        title_layout.addStretch()
-        
-        # 添加标题到卡片
-        card_layout.addLayout(title_layout)
-        
-        # 内容区域
-        content_browser = QTextBrowser()
-        content_browser.setMaximumHeight(80)
-        content_browser.setStyleSheet("""
-            QTextBrowser {
-                background-color: rgba(250, 250, 255, 0.7);
-                border: 1px solid #e0e0f0;
-                border-radius: 4px;
-                padding: 6px;
-                font-size: 12px;
-                line-height: 1.4;
-                color: #303050;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(160, 180, 220, 0.5);
-                min-height: 20px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(130, 150, 200, 0.7);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
-        
-        # 格式化内容
-        formatted_content = self.format_event_content(event_type, content, event_data)
-        content_browser.setText(formatted_content)
-        
-        # 添加内容到卡片
-        card_layout.addWidget(content_browser)
-        
-        return card
-    
-    def get_event_style(self, event_type):
-        """获取事件样式"""
-        styles = {
-            ProcessEventType.COMPLEXITY.value: ("🧮", "#8e44ad", "复杂度评估"),
-            ProcessEventType.ARCHITECTURE.value: ("🏗️", "#3498db", "架构选择"),
-            ProcessEventType.PLAN.value: ("📝", "#2ecc71", "执行计划"),
-            ProcessEventType.THINKING.value: ("🧠", "#e67e22", "思考过程"),
-            ProcessEventType.TOOL_CALL.value: ("🔧", "#f39c12", "工具调用"),
-            ProcessEventType.TOOL_RESULT.value: ("📊", "#16a085", "工具返回"),
-            ProcessEventType.FINAL_ANSWER.value: ("✅", "#27ae60", "最终回答")
-        }
-        
-        return styles.get(event_type, ("❓", "#7f8c8d", "未知事件"))
-    
-    def format_event_content(self, event_type, content, event_data):
-        """格式化事件内容"""
-        if event_type == ProcessEventType.TOOL_CALL.value:
-            tool_name = event_data.get("tool_name", "未知工具")
-            parameters = event_data.get("parameters", "{}")
-            
-            return f"<b>工具名称:</b> {tool_name}<br><b>参数:</b><br>{parameters}"
-        
-        elif event_type == ProcessEventType.COMPLEXITY.value or event_type == ProcessEventType.ARCHITECTURE.value:
-            # 简单提取值
-            value = re.sub(r"【.*?】", "", content).strip()
-            return f"<b>值:</b> {value}"
-            
-        else:
-            # 对其他类型简单格式化
-            return content.replace("\n", "<br>")
-    
-    def clear_events(self):
-        """清除所有事件"""
-        self.events = []
-        
-        # 清除内容布局中的所有小部件
-        while self.content_layout.count():
-            item = self.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        # 隐藏组件
-        self.hide()
-
 def main():
-    """主函数 - UI版本"""
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     
-    # 设置全局样式
-    app.setStyle("Fusion")
+    window = MacOSAssistantUI()
+    window.show()
     
-    # 设置高DPI支持
-    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
-    app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)
-    
-    # 创建UI
-    ui = MacOSAssistantUI()
-    ui.show()
-    
-    # 启动应用
     sys.exit(app.exec())
 
 if __name__ == "__main__":
