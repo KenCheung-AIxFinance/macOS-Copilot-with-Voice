@@ -20,7 +20,7 @@ import re
 import markdown
 
 # 导入我们的macOS助手
-from agent import IntelligentMacOSAssistant, ArchitectureType, TaskComplexity
+from agent import IntelligentMacOSAssistant, ArchitectureType, TaskComplexity, EnhancedStreamingHandler
 
 class WorkerSignals(QObject):
     """定义工作线程的信号"""
@@ -28,7 +28,10 @@ class WorkerSignals(QObject):
     error = pyqtSignal(str)
     result = pyqtSignal(str)
     status = pyqtSignal(str)
-    stream_chunk = pyqtSignal(str)  # 新增：流式文本块信号
+    stream_chunk = pyqtSignal(str)  # 流式文本块信号
+    stream_start = pyqtSignal()     # 流式输出开始信号
+    stream_end = pyqtSignal()       # 流式输出结束信号
+    stream_thinking = pyqtSignal(bool)  # 流式思考状态信号（用于显示思考指示器）
 
 class AudioWorker(QThread):
     """处理音频识别的工作线程"""
@@ -156,23 +159,6 @@ class TTSWorker(QThread):
         finally:
             self.signals.finished.emit()
 
-class AssistantWorker(QThread):
-    """处理助手响应的工作线程"""
-    def __init__(self, assistant, user_input):
-        super().__init__()
-        self.assistant = assistant
-        self.user_input = user_input
-        self.signals = WorkerSignals()
-
-    def run(self):
-        try:
-            response = self.assistant.chat(self.user_input)
-            self.signals.result.emit(response)
-        except Exception as e:
-            self.signals.error.emit(str(e))
-        finally:
-            self.signals.finished.emit()
-
 class StreamingAssistantWorker(QThread):
     """处理助手流式响应的工作线程"""
     def __init__(self, assistant, user_input):
@@ -180,21 +166,70 @@ class StreamingAssistantWorker(QThread):
         self.assistant = assistant
         self.user_input = user_input
         self.signals = WorkerSignals()
+        self.active = True  # 控制线程是否继续处理
+        
+        # 流式处理器配置
+        self.streaming_handler = None
+
+    def stop(self):
+        """停止流式输出处理"""
+        self.active = False
 
     def run(self):
         try:
+            # 发送流式输出开始信号
+            self.signals.stream_start.emit()
+            
+            # 创建增强的流式处理器
+            self.streaming_handler = EnhancedStreamingHandler(
+                streaming_callback=lambda token: self.handle_token(token),
+                thinking_callback=lambda is_thinking: self.signals.stream_thinking.emit(is_thinking),
+                start_callback=lambda: self.signals.stream_start.emit(),
+                end_callback=lambda: self.signals.stream_end.emit()
+            )
+            
             # 使用流式响应
             full_response = ""
-            for chunk in self.assistant.chat_stream(self.user_input):
-                full_response += chunk
-                self.signals.stream_chunk.emit(chunk)
+            
+            # 如果assistant有自定义的stream_with_handler方法，使用它
+            if hasattr(self.assistant, 'stream_with_handler'):
+                # 这是一个假设的方法，实际上需要在agent.py中实现
+                for chunk in self.assistant.stream_with_handler(self.user_input, self.streaming_handler):
+                    if not self.active:
+                        break  # 如果被停止则中断处理
+                    
+                    full_response += chunk
+            else:
+                # 使用标准stream方式
+                for chunk in self.assistant.chat_stream(self.user_input):
+                    if not self.active:
+                        break  # 如果被停止则中断处理
+                    
+                    full_response += chunk
+                    # 发送单个文本块
+                    self.signals.stream_chunk.emit(chunk)
+                    
+                    # 短暂延时以优化UI响应
+                    QThread.msleep(10)
             
             # 发送完整响应用于其他处理（如TTS）
-            self.signals.result.emit(full_response)
+            if self.active:  # 只在正常完成时发送结果
+                self.signals.result.emit(full_response)
+                
+            # 发送流式输出结束信号
+            self.signals.stream_end.emit()
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit()
+            
+    def handle_token(self, token):
+        """处理从增强流式处理器收到的单个令牌"""
+        if not self.active:
+            return
+        
+        # 发送文本块
+        self.signals.stream_chunk.emit(token)
 
 class StatusLabel(QLabel):
     def __init__(self, text, parent=None):
@@ -212,11 +247,55 @@ class StatusLabel(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumHeight(50)
 
+class TypingIndicator(QLabel):
+    """打字效果指示器，用于显示AI正在输入的状态"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.dots_count = 0
+        self.max_dots = 3
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_dots)
+        self.setStyleSheet("""
+            QLabel {
+                color: #007AFF;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 5px;
+            }
+        """)
+        self.hide()
+        
+    def start(self):
+        """开始显示打字指示器"""
+        self.dots_count = 0
+        self.update_dots()
+        self.show()
+        self.timer.start(500)  # 每500毫秒更新一次
+        
+    def stop(self):
+        """停止显示打字指示器"""
+        self.timer.stop()
+        self.hide()
+        
+    def update_dots(self):
+        """更新点的数量来创建动画效果"""
+        self.dots_count = (self.dots_count + 1) % (self.max_dots + 1)
+        dots = "." * self.dots_count
+        self.setText(f"AI正在输入{dots}")
+
 class ChatBubble(QFrame):
     def __init__(self, text, is_user=True, parent=None):
         super().__init__(parent)
         self.is_user = is_user
         self.current_text = text  # 保存当前文本内容
+        self.typing_indicator = None
+        
+        if not is_user:
+            # 只为助手消息添加打字指示器
+            self.typing_indicator = TypingIndicator(self)
+            self.typing_indicator.hide()
         
         # 设置样式 - 全宽设计
         if is_user:
@@ -397,11 +476,41 @@ class ChatBubble(QFrame):
         # 更新布局
         self.adjustWidth()
     
+    def start_typing_indicator(self):
+        """开始显示打字指示器"""
+        if self.typing_indicator and self.current_text == "":
+            self.typing_indicator.start()
+    
+    def stop_typing_indicator(self):
+        """停止显示打字指示器"""
+        if self.typing_indicator:
+            self.typing_indicator.stop()
+            
     def append_text(self, text_chunk):
         """追加文本内容（用于流式显示）"""
+        # 如果有文本开始出现，停止打字指示器
+        if self.current_text == "" and text_chunk != "":
+            self.stop_typing_indicator()
+            
         self.current_text += text_chunk
-        self.update_text(self.current_text)
         
+        # 对于小块文本更新，使用更高效的处理方式
+        if len(text_chunk) < 100 and not ("\n" in text_chunk or "```" in text_chunk):
+            # 纯文本小块更新，不需要完全重新渲染Markdown
+            if self.is_user:
+                cursor = self.text_browser.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.insertText(text_chunk)
+            else:
+                # 助手消息，需要重新渲染Markdown以支持格式化
+                self.update_text(self.current_text)
+        else:
+            # 大块文本或包含特殊格式，完全重新渲染
+            self.update_text(self.current_text)
+            
+        # 调整宽度和滚动位置
+        QTimer.singleShot(10, self.adjustWidth)
+    
     def adjustWidth(self):
         """完全自适应文本高度，无滚动条"""
         # 获取文档内容的大小
@@ -1089,6 +1198,9 @@ class MacOSAssistantUI(QMainWindow):
         self.add_message("你", text)
         self.input_text.clear()
         
+        # 禁用发送按钮防止重复发送
+        self.send_button.setEnabled(False)
+        
         # 更新状态
         self.update_status("正在处理...")
         
@@ -1106,12 +1218,39 @@ class MacOSAssistantUI(QMainWindow):
         # 创建空的助手消息气泡（用于流式更新）
         self.current_assistant_bubble = self.add_message("助手", "", create_empty=True)
         
+        # 启动打字指示器
+        self.current_assistant_bubble.start_typing_indicator()
+        
+        # 如果存在上一个流式工作线程，停止它
+        if hasattr(self, 'assistant_worker') and self.assistant_worker is not None:
+            self.assistant_worker.stop()
+            self.assistant_worker.wait()
+        
         # 启动流式助手工作线程
         self.assistant_worker = StreamingAssistantWorker(self.assistant, text)
+        self.assistant_worker.signals.stream_start.connect(self.on_stream_start)
         self.assistant_worker.signals.stream_chunk.connect(self.handle_stream_chunk)
+        self.assistant_worker.signals.stream_end.connect(self.on_stream_end)
         self.assistant_worker.signals.result.connect(self.handle_assistant_response)
         self.assistant_worker.signals.error.connect(self.handle_error)
         self.assistant_worker.start()
+    
+    def on_stream_start(self):
+        """流式输出开始时的处理"""
+        # 可以在这里添加开始反馈，如显示思考指示器等
+        self.update_status("AI正在回答...")
+    
+    def on_stream_end(self):
+        """流式输出结束时的处理"""
+        # 流式输出完成后的UI更新
+        self.update_status("回答已完成")
+        
+        # 确保打字指示器被关闭
+        if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
+            self.current_assistant_bubble.stop_typing_indicator()
+        
+        # 重新启用发送按钮
+        self.send_button.setEnabled(True)
     
     def handle_stream_chunk(self, chunk):
         """处理流式文本块"""
@@ -1123,7 +1262,14 @@ class MacOSAssistantUI(QMainWindow):
     def handle_assistant_response(self, response):
         """处理助手响应"""
         # 流式显示已经完成，这里主要用于TTS等后续处理
-        self.update_status("正在聆听...")
+        self.update_status("回答已完成")
+        
+        # 确保打字指示器被关闭
+        if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
+            self.current_assistant_bubble.stop_typing_indicator()
+        
+        # 重新启用发送按钮
+        self.send_button.setEnabled(True)
         
         # 如果启用了TTS，播放响应
         if self.tts_button.isChecked():

@@ -21,6 +21,7 @@ from langchain.tools import BaseTool
 from langchain.schema import BaseOutputParser
 from langchain_core.callbacks import StreamingStdOutCallbackHandler
 import asyncio
+from langchain_core.callbacks.base import BaseCallbackHandler
 
 class MacOSTools:
     """macOS系统工具集合"""
@@ -407,6 +408,76 @@ class ArchitectureType(enum.Enum):
     REACT = 4        # Reasoning + Acting 架构
     PLANNER = 5      # 完整规划架构
 
+class EnhancedStreamingHandler(BaseCallbackHandler):
+    """增强的流式回调处理器，支持更多状态和事件回调"""
+    
+    def __init__(self, streaming_callback=None, thinking_callback=None, 
+                 start_callback=None, end_callback=None):
+        """初始化处理器
+        
+        Args:
+            streaming_callback: 接收流式文本的回调函数
+            thinking_callback: 接收思考状态的回调函数
+            start_callback: 流式输出开始的回调函数
+            end_callback: 流式输出结束的回调函数
+        """
+        self.streaming_callback = streaming_callback
+        self.thinking_callback = thinking_callback
+        self.start_callback = start_callback
+        self.end_callback = end_callback
+        self.is_thinking = False
+        self.response_started = False
+        self.current_token_buffer = ""
+        
+    def on_llm_start(self, *args, **kwargs):
+        """LLM开始生成时的回调"""
+        if self.start_callback and not self.response_started:
+            self.start_callback()
+            self.response_started = True
+    
+    def on_llm_new_token(self, token: str, **kwargs):
+        """处理新的LLM令牌"""
+        # 检测思考模式
+        if "思考:" in token or "思考中:" in token or "让我思考:" in token:
+            if self.thinking_callback and not self.is_thinking:
+                self.is_thinking = True
+                self.thinking_callback(True)
+        
+        # 检测思考结束
+        if self.is_thinking and ("我的回答是:" in token or "回答:" in token):
+            if self.thinking_callback:
+                self.is_thinking = False
+                self.thinking_callback(False)
+        
+        # 缓冲和处理token
+        self.current_token_buffer += token
+        
+        # 当缓冲区包含完整词或标点时才发送
+        if (len(self.current_token_buffer) > 5 or 
+            any(p in self.current_token_buffer for p in [" ", ".", ",", "!", "?", "\n"])):
+            if self.streaming_callback:
+                self.streaming_callback(self.current_token_buffer)
+            self.current_token_buffer = ""
+    
+    def on_llm_end(self, *args, **kwargs):
+        """LLM结束生成时的回调"""
+        # 发送任何剩余的缓冲区内容
+        if self.current_token_buffer and self.streaming_callback:
+            self.streaming_callback(self.current_token_buffer)
+            self.current_token_buffer = ""
+        
+        # 结束思考模式(如果仍在思考)
+        if self.is_thinking and self.thinking_callback:
+            self.is_thinking = False
+            self.thinking_callback(False)
+        
+        # 调用结束回调
+        if self.end_callback:
+            self.end_callback()
+            
+        # 重置状态
+        self.response_started = False
+
 class IntelligentMacOSAssistant:
     """增强智能的macOS系统助手"""
     
@@ -766,15 +837,30 @@ class IntelligentMacOSAssistant:
             executor = self._get_executor_for_architecture(architecture)
             
             # 4. 执行流式响应
-            streaming_handler = StreamingStdOutCallbackHandler()
+            buffer = []  # 用于存储收到的令牌
+            
+            # 定义Token处理回调函数
+            def token_callback(token):
+                if token:
+                    buffer.append(token)  # 添加令牌到缓冲区
+                    return token  # 返回令牌以供后续处理
+            
+            # 创建增强的流式处理器
+            streaming_handler = EnhancedStreamingHandler(
+                streaming_callback=token_callback
+            )
+            
             full_response = ""
             success = True
             
             try:
+                # 使用自定义处理器
+                stream_config = {"callbacks": [streaming_handler]}
+                
                 for chunk in executor.stream({
                     "input": user_input,
                     "chat_history": self.chat_history
-                }, config={"callbacks": [streaming_handler]}):
+                }, config=stream_config):
                     if "output" in chunk:
                         # 获取新的文本片段
                         new_text = chunk["output"]
@@ -783,7 +869,21 @@ class IntelligentMacOSAssistant:
                             delta = new_text[len(full_response):]
                             if delta:
                                 yield delta
+                            
+                            # 处理缓冲区中的任何令牌
+                            while buffer:
+                                token = buffer.pop(0)
+                                if token:  # 避免空令牌
+                                    yield token
+                                    
                             full_response = new_text
+                
+                # 处理任何剩余的缓冲区内容
+                while buffer:
+                    token = buffer.pop(0)
+                    if token:
+                        yield token
+                        
             except Exception as e:
                 error_msg = f"执行失败: {str(e)}"
                 yield f"\n{error_msg}\n正在尝试使用更高级的架构..."
@@ -855,6 +955,92 @@ class IntelligentMacOSAssistant:
             "success_rate": success_rate,
             "strategy_effectiveness": self.user_context["successful_strategies"]
         }
+    
+    def stream_with_handler(self, user_input: str, custom_handler) -> Generator[str, None, None]:
+        """使用自定义处理器的流式输出
+        
+        Args:
+            user_input: 用户输入文本
+            custom_handler: 自定义回调处理器(EnhancedStreamingHandler实例)
+            
+        Returns:
+            生成文本块的生成器
+        """
+        try:
+            # 任务计数增加
+            self.task_counter += 1
+            
+            # 1. 评估任务复杂度
+            complexity = self._evaluate_task_complexity(user_input)
+            
+            # 2. 选择合适的架构
+            architecture = self._select_architecture(complexity)
+            
+            # 3. 获取对应的执行器
+            executor = self._get_executor_for_architecture(architecture)
+            
+            # 4. 执行流式响应
+            full_response = ""
+            success = True
+            
+            try:
+                # 使用自定义处理器
+                stream_config = {"callbacks": [custom_handler]}
+                
+                for chunk in executor.stream({
+                    "input": user_input,
+                    "chat_history": self.chat_history
+                }, config=stream_config):
+                    if "output" in chunk:
+                        # 获取新的文本片段
+                        new_text = chunk["output"]
+                        if new_text and new_text != full_response:
+                            # 只返回新增的部分
+                            delta = new_text[len(full_response):]
+                            if delta:
+                                yield delta
+                            full_response = new_text
+            except Exception as e:
+                error_msg = f"执行失败: {str(e)}"
+                yield f"\n{error_msg}\n正在尝试使用更高级的架构..."
+                
+                # 如果失败，尝试升级到更复杂的架构
+                success = False
+                if architecture != ArchitectureType.PLANNER:
+                    # 获取下一级架构
+                    next_architecture = min(ArchitectureType(architecture.value + 1), ArchitectureType.PLANNER)
+                    next_executor = self._get_executor_for_architecture(next_architecture)
+                    
+                    try:
+                        result = next_executor.invoke({
+                            "input": user_input,
+                            "chat_history": self.chat_history
+                        })
+                        yield f"\n使用高级架构重试成功:\n{result['output']}"
+                        full_response = result["output"]
+                        # 更新成功策略
+                        self._track_success(complexity, next_architecture, True)
+                        # 记录当前架构的失败
+                        self._track_success(complexity, architecture, False)
+                        success = True
+                    except Exception as retry_e:
+                        yield f"\n高级架构也失败了: {str(retry_e)}"
+                        # 记录失败
+                        self._track_success(complexity, next_architecture, False)
+            
+            # 5. 更新聊天历史
+            self.chat_history.append(HumanMessage(content=user_input))
+            self.chat_history.append(AIMessage(content=full_response))
+            
+            # 6. 跟踪成功率
+            if success:
+                self.success_counter += 1
+                self._track_success(complexity, architecture, True)
+            
+        except Exception as e:
+            error_msg = f"处理请求时发生错误: {str(e)}"
+            print(error_msg)
+            yield error_msg
 
 # 保留原始的MacOSAssistant类以向后兼容
 class MacOSAssistant:
@@ -922,8 +1108,19 @@ class MacOSAssistant:
     def chat_stream(self, user_input: str) -> Generator[str, None, None]:
         """处理用户输入并返回流式响应"""
         try:
-            # 创建流式回调处理器
-            streaming_handler = StreamingStdOutCallbackHandler()
+            # 创建增强的流式处理器和令牌缓冲区
+            buffer = []
+            
+            # 定义Token处理回调
+            def token_callback(token):
+                if token:
+                    buffer.append(token)
+                    return token
+            
+            # 创建处理器
+            streaming_handler = EnhancedStreamingHandler(
+                streaming_callback=token_callback
+            )
             
             # 执行代理流式响应
             full_response = ""
@@ -939,7 +1136,20 @@ class MacOSAssistant:
                         delta = new_text[len(full_response):]
                         if delta:
                             yield delta
+                        
+                        # 处理缓冲区中的标记
+                        while buffer:
+                            token = buffer.pop(0)
+                            if token:
+                                yield token
+                        
                         full_response = new_text
+            
+            # 处理任何剩余的缓冲区内容
+            while buffer:
+                token = buffer.pop(0)
+                if token:
+                    yield token
             
             # 更新聊天历史
             self.chat_history.append(HumanMessage(content=user_input))
@@ -973,12 +1183,53 @@ class MacOSAssistant:
         """重置聊天历史"""
         self.chat_history = []
 
+    def stream_with_handler(self, user_input: str, custom_handler) -> Generator[str, None, None]:
+        """使用自定义处理器的流式输出
+        
+        Args:
+            user_input: 用户输入文本
+            custom_handler: 自定义回调处理器(EnhancedStreamingHandler实例)
+            
+        Returns:
+            生成文本块的生成器
+        """
+        try:
+            # 执行代理流式响应
+            full_response = ""
+            
+            # 使用自定义处理器
+            for chunk in self.agent_executor.stream({
+                "input": user_input,
+                "chat_history": self.chat_history
+            }, config={"callbacks": [custom_handler]}):
+                if "output" in chunk:
+                    # 获取新的文本片段
+                    new_text = chunk["output"]
+                    if new_text and new_text != full_response:
+                        # 只返回新增的部分
+                        delta = new_text[len(full_response):]
+                        if delta:
+                            yield delta
+                        full_response = new_text
+            
+            # 更新聊天历史
+            self.chat_history.append(HumanMessage(content=user_input))
+            self.chat_history.append(AIMessage(content=full_response))
+            
+        except Exception as e:
+            error_msg = f"处理请求时发生错误: {str(e)}"
+            print(error_msg)
+            yield error_msg
+
 def main():
     """主函数 - 命令行界面"""
     # 使用现有的API密钥
     api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
     
     print("🤖 macOS系统助手启动中...")
+    print("=" * 50)
+    print("版本: 1.1.0 (增强流式输出)")
+    print("最后更新: " + datetime.now().strftime("%Y-%m-%d"))
     print("=" * 50)
     
     # 使用增强智能助手
@@ -1004,8 +1255,26 @@ def main():
             print("\n🤖 助手: ", end="", flush=True)
             
             # 使用流式响应
-            for chunk in assistant.chat_stream(user_input):
-                print(chunk, end="", flush=True)
+            # 创建自定义处理器
+            def on_token(token):
+                print(token, end="", flush=True)
+            
+            streaming_handler = EnhancedStreamingHandler(
+                streaming_callback=on_token,
+                start_callback=lambda: print("(思考中...)", end="", flush=True),
+                thinking_callback=lambda is_thinking: print("." if is_thinking else "", end="", flush=True),
+                end_callback=lambda: print("(完成)", end="", flush=True)
+            )
+            
+            # 使用自定义处理器的流式输出
+            try:
+                # 使用流式输出，但仅收集结果
+                result = ""
+                for chunk in assistant.stream_with_handler(user_input, streaming_handler):
+                    result += chunk
+                # 结果已经在回调中打印，不需要再次打印
+            except Exception as e:
+                print(f"\n❌ 流式输出错误: {str(e)}")
             
             print()  # 换行
             
