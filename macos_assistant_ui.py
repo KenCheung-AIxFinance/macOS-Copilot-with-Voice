@@ -20,7 +20,7 @@ import re
 import markdown
 
 # 导入我们的macOS助手
-from agent import MacOSAssistant
+from agent import IntelligentMacOSAssistant, ArchitectureType, TaskComplexity
 
 class WorkerSignals(QObject):
     """定义工作线程的信号"""
@@ -28,6 +28,7 @@ class WorkerSignals(QObject):
     error = pyqtSignal(str)
     result = pyqtSignal(str)
     status = pyqtSignal(str)
+    stream_chunk = pyqtSignal(str)  # 新增：流式文本块信号
 
 class AudioWorker(QThread):
     """处理音频识别的工作线程"""
@@ -36,10 +37,10 @@ class AudioWorker(QThread):
         self.recognizer = recognizer
         self.signals = WorkerSignals()
         self.is_running = True
-        self.is_speaking = False  # AI是否正在说话
-        self.is_paused = False    # 用户是否暂停了语音输入
-        self.microphone = None    # 全局麦克风对象
-        self.should_reset = False # 是否需要重置麦克风
+        self.is_speaking = False
+        self.is_paused = False
+        self.microphone = None
+        self.should_reset = False
 
     def set_speaking(self, speaking):
         """设置说话状态"""
@@ -172,6 +173,29 @@ class AssistantWorker(QThread):
         finally:
             self.signals.finished.emit()
 
+class StreamingAssistantWorker(QThread):
+    """处理助手流式响应的工作线程"""
+    def __init__(self, assistant, user_input):
+        super().__init__()
+        self.assistant = assistant
+        self.user_input = user_input
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            # 使用流式响应
+            full_response = ""
+            for chunk in self.assistant.chat_stream(self.user_input):
+                full_response += chunk
+                self.signals.stream_chunk.emit(chunk)
+            
+            # 发送完整响应用于其他处理（如TTS）
+            self.signals.result.emit(full_response)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+        finally:
+            self.signals.finished.emit()
+
 class StatusLabel(QLabel):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
@@ -192,6 +216,7 @@ class ChatBubble(QFrame):
     def __init__(self, text, is_user=True, parent=None):
         super().__init__(parent)
         self.is_user = is_user
+        self.current_text = text  # 保存当前文本内容
         
         # 设置样式 - 全宽设计
         if is_user:
@@ -338,6 +363,26 @@ class ChatBubble(QFrame):
             self.text_browser.setPlainText(text)
         else:
             # 助手消息进行Markdown处理
+            self.update_text(text)
+        
+        # 添加文本浏览器到布局
+        layout.addWidget(self.text_browser)
+        
+        # 设置自适应大小
+        self.adjustSize()
+        
+        # 修正气泡宽度
+        self.adjustWidth()
+    
+    def update_text(self, text):
+        """更新文本内容（支持流式更新）"""
+        self.current_text = text
+        
+        if self.is_user:
+            # 用户消息直接显示纯文本
+            self.text_browser.setPlainText(text)
+        else:
+            # 助手消息进行Markdown处理
             try:
                 # 转换Markdown为HTML
                 html_content = markdown.markdown(
@@ -349,14 +394,13 @@ class ChatBubble(QFrame):
                 # 如果Markdown处理失败，显示原始文本
                 self.text_browser.setPlainText(text)
         
-        # 添加文本浏览器到布局
-        layout.addWidget(self.text_browser)
-        
-        # 设置自适应大小
-        self.adjustSize()
-        
-        # 修正气泡宽度
+        # 更新布局
         self.adjustWidth()
+    
+    def append_text(self, text_chunk):
+        """追加文本内容（用于流式显示）"""
+        self.current_text += text_chunk
+        self.update_text(self.current_text)
         
     def adjustWidth(self):
         """完全自适应文本高度，无滚动条"""
@@ -455,9 +499,9 @@ class MacOSAssistantUI(QMainWindow):
         self.recognizer.phrase_threshold = 0.5
         self.recognizer.non_speaking_duration = 0.8
         
-        # 初始化macOS助手
+        # 初始化macOS智能助手
         api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
-        self.assistant = MacOSAssistant(api_key)
+        self.assistant = IntelligentMacOSAssistant(api_key)
         
         # 创建UI
         self.init_ui()
@@ -489,6 +533,15 @@ class MacOSAssistantUI(QMainWindow):
         ]
         
         self.update_preset_commands()
+        
+        # 当前正在使用的架构
+        self.current_architecture = ArchitectureType.DIRECT
+        self.current_complexity = TaskComplexity.SIMPLE
+        
+        # 定时更新指示器
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_intelligence_indicators)
+        self.update_timer.start(2000)  # 每2秒更新一次
         
     def init_ui(self):
         # 创建主窗口部件
@@ -706,82 +759,22 @@ class MacOSAssistantUI(QMainWindow):
         input_layout.setContentsMargins(32, 16, 32, 24)
         input_layout.setSpacing(16)
         
-        # 创建控制面板
+        # 创建控制面板 - 更简约设计
         control_panel = QWidget()
         control_panel.setStyleSheet("""
             QWidget {
                 background-color: #fafbfc;
-                border: 1px solid #e5e5e5;
-                border-radius: 12px;
+                border: none;
+                border-radius: 8px;
             }
         """)
         
         control_panel_layout = QHBoxLayout(control_panel)
-        control_panel_layout.setContentsMargins(16, 12, 16, 12)
-        control_panel_layout.setSpacing(16)
+        control_panel_layout.setContentsMargins(12, 10, 12, 10)
+        control_panel_layout.setSpacing(12)
         
         # 创建状态显示容器
-        status_container = QWidget()
-        status_container.setStyleSheet("background-color: transparent; border: none;")
-        status_layout = QHBoxLayout(status_container)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(20)
-        
-        # AI朗读状态指示器
-        tts_status_widget = QWidget()
-        tts_status_widget.setStyleSheet("""
-            QWidget {
-                background-color: white;
-                border-radius: 8px;
-                border: 1px solid #e0e0e0;
-            }
-        """)
-        tts_status_layout = QHBoxLayout(tts_status_widget)
-        tts_status_layout.setContentsMargins(12, 6, 12, 6)
-        tts_status_layout.setSpacing(8)
-        
-        tts_icon = QLabel("🔊")
-        tts_icon.setStyleSheet("font-size: 16px;")
-        tts_status_layout.addWidget(tts_icon)
-        
-        tts_label = QLabel("AI朗读")
-        tts_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 600;")
-        tts_status_layout.addWidget(tts_label)
-        
-        self.tts_status = QLabel("已关闭")
-        self.tts_status.setStyleSheet("font-size: 13px; color: #dc3545; font-weight: 500;")
-        tts_status_layout.addWidget(self.tts_status)
-        
-        status_layout.addWidget(tts_status_widget)
-        
-        # 语音输入状态指示器
-        voice_status_widget = QWidget()
-        voice_status_widget.setStyleSheet("""
-            QWidget {
-                background-color: white;
-                border-radius: 8px;
-                border: 1px solid #e0e0e0;
-            }
-        """)
-        voice_status_layout = QHBoxLayout(voice_status_widget)
-        voice_status_layout.setContentsMargins(12, 6, 12, 6)
-        voice_status_layout.setSpacing(8)
-        
-        voice_icon = QLabel("🎤")
-        voice_icon.setStyleSheet("font-size: 16px;")
-        voice_status_layout.addWidget(voice_icon)
-        
-        voice_label = QLabel("语音输入")
-        voice_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 600;")
-        voice_status_layout.addWidget(voice_label)
-        
-        self.voice_input_status = QLabel("已关闭")
-        self.voice_input_status.setStyleSheet("font-size: 13px; color: #dc3545; font-weight: 500;")
-        voice_status_layout.addWidget(self.voice_input_status)
-        
-        status_layout.addWidget(voice_status_widget)
-        status_layout.addStretch(1)
-        
+        status_container = self.create_status_display_container()
         control_panel_layout.addWidget(status_container, 3)
         
         # 添加垂直分割线
@@ -950,6 +943,102 @@ class MacOSAssistantUI(QMainWindow):
         
         input_layout.addLayout(input_row)
     
+    def create_status_display_container(self):
+        """创建状态显示容器 - 极简设计"""
+        status_container = QWidget()
+        status_container.setStyleSheet("background-color: transparent; border: none;")
+        status_layout = QHBoxLayout(status_container)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(16)
+        
+        # AI朗读状态指示器 - 极简设计
+        tts_status_widget = QWidget()
+        tts_status_widget.setStyleSheet("background-color: transparent;")
+        tts_status_layout = QHBoxLayout(tts_status_widget)
+        tts_status_layout.setContentsMargins(8, 0, 8, 0)
+        tts_status_layout.setSpacing(6)
+        
+        tts_icon = QLabel("🔊")
+        tts_icon.setStyleSheet("font-size: 16px;")
+        tts_status_layout.addWidget(tts_icon)
+        
+        tts_label = QLabel("AI朗读")
+        tts_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 500;")
+        tts_status_layout.addWidget(tts_label)
+        
+        self.tts_status = QLabel("已关闭")
+        self.tts_status.setStyleSheet("font-size: 13px; color: #dc3545; font-weight: 500;")
+        tts_status_layout.addWidget(self.tts_status)
+        
+        status_layout.addWidget(tts_status_widget)
+        
+        # 语音输入状态指示器 - 极简设计
+        voice_status_widget = QWidget()
+        voice_status_widget.setStyleSheet("background-color: transparent;")
+        voice_status_layout = QHBoxLayout(voice_status_widget)
+        voice_status_layout.setContentsMargins(8, 0, 8, 0)
+        voice_status_layout.setSpacing(6)
+        
+        voice_icon = QLabel("🎤")
+        voice_icon.setStyleSheet("font-size: 16px;")
+        voice_status_layout.addWidget(voice_icon)
+        
+        voice_label = QLabel("语音输入")
+        voice_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 500;")
+        voice_status_layout.addWidget(voice_label)
+        
+        self.voice_input_status = QLabel("已关闭")
+        self.voice_input_status.setStyleSheet("font-size: 13px; color: #dc3545; font-weight: 500;")
+        voice_status_layout.addWidget(self.voice_input_status)
+        
+        status_layout.addWidget(voice_status_widget)
+        
+        # 智能架构状态指示器 - 新增
+        arch_status_widget = QWidget()
+        arch_status_widget.setStyleSheet("background-color: transparent;")
+        arch_status_layout = QHBoxLayout(arch_status_widget)
+        arch_status_layout.setContentsMargins(8, 0, 8, 0)
+        arch_status_layout.setSpacing(6)
+        
+        arch_icon = QLabel("🧠")
+        arch_icon.setStyleSheet("font-size: 16px;")
+        arch_status_layout.addWidget(arch_icon)
+        
+        arch_label = QLabel("思考模式")
+        arch_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 500;")
+        arch_status_layout.addWidget(arch_label)
+        
+        self.arch_status = QLabel("直接响应")
+        self.arch_status.setStyleSheet("font-size: 13px; color: #007AFF; font-weight: 500;")
+        arch_status_layout.addWidget(self.arch_status)
+        
+        status_layout.addWidget(arch_status_widget)
+        
+        # 任务复杂度指示器 - 新增
+        complexity_status_widget = QWidget()
+        complexity_status_widget.setStyleSheet("background-color: transparent;")
+        complexity_status_layout = QHBoxLayout(complexity_status_widget)
+        complexity_status_layout.setContentsMargins(8, 0, 8, 0)
+        complexity_status_layout.setSpacing(6)
+        
+        complexity_icon = QLabel("📊")
+        complexity_icon.setStyleSheet("font-size: 16px;")
+        complexity_status_layout.addWidget(complexity_icon)
+        
+        complexity_label = QLabel("任务难度")
+        complexity_label.setStyleSheet("font-size: 13px; color: #424242; font-weight: 500;")
+        complexity_status_layout.addWidget(complexity_label)
+        
+        self.complexity_status = QLabel("简单")
+        self.complexity_status.setStyleSheet("font-size: 13px; color: #28a745; font-weight: 500;")
+        complexity_status_layout.addWidget(self.complexity_status)
+        
+        status_layout.addWidget(complexity_status_widget)
+        
+        status_layout.addStretch(1)
+        
+        return status_container
+    
     def update_preset_commands(self):
         """更新预设命令列表"""
         self.preset_list.clear()
@@ -1003,22 +1092,48 @@ class MacOSAssistantUI(QMainWindow):
         # 更新状态
         self.update_status("正在处理...")
         
-        # 启动助手工作线程
-        self.assistant_worker = AssistantWorker(self.assistant, text)
+        # 在发送前评估任务复杂度
+        if hasattr(self.assistant, '_evaluate_task_complexity'):
+            try:
+                self.current_complexity = self.assistant._evaluate_task_complexity(text)
+                # 根据复杂度选择架构
+                self.current_architecture = self.assistant._select_architecture(self.current_complexity)
+                # 更新显示
+                self.update_intelligence_indicators()
+            except Exception as e:
+                print(f"复杂度评估错误: {str(e)}")
+        
+        # 创建空的助手消息气泡（用于流式更新）
+        self.current_assistant_bubble = self.add_message("助手", "", create_empty=True)
+        
+        # 启动流式助手工作线程
+        self.assistant_worker = StreamingAssistantWorker(self.assistant, text)
+        self.assistant_worker.signals.stream_chunk.connect(self.handle_stream_chunk)
         self.assistant_worker.signals.result.connect(self.handle_assistant_response)
         self.assistant_worker.signals.error.connect(self.handle_error)
         self.assistant_worker.start()
     
+    def handle_stream_chunk(self, chunk):
+        """处理流式文本块"""
+        if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
+            self.current_assistant_bubble.append_text(chunk)
+            # 滚动到底部以显示最新内容
+            QTimer.singleShot(10, self.scroll_to_bottom)
+    
     def handle_assistant_response(self, response):
         """处理助手响应"""
-        self.add_message("助手", response)
+        # 流式显示已经完成，这里主要用于TTS等后续处理
         self.update_status("正在聆听...")
         
         # 如果启用了TTS，播放响应
         if self.tts_button.isChecked():
             self.speak_response(response)
+        
+        # 清除当前助手气泡引用
+        if hasattr(self, 'current_assistant_bubble'):
+            self.current_assistant_bubble = None
     
-    def add_message(self, sender, message):
+    def add_message(self, sender, message, create_empty=False):
         """添加消息到聊天区域"""
         is_user = (sender == "你")
         current_time = datetime.now().strftime("%H:%M")
@@ -1092,6 +1207,12 @@ class MacOSAssistantUI(QMainWindow):
         
         # 强制更新，确保实时显示
         QApplication.processEvents()
+        
+        # 如果是创建空的助手消息，返回气泡引用
+        if create_empty:
+            return bubble
+        
+        return None
     
     def scroll_to_bottom(self):
         """滚动到聊天区域底部"""
@@ -1181,6 +1302,10 @@ class MacOSAssistantUI(QMainWindow):
     
     def clear_chat(self):
         """清空聊天记录"""
+        # 清除当前助手气泡引用
+        if hasattr(self, 'current_assistant_bubble'):
+            self.current_assistant_bubble = None
+        
         # 清除所有聊天消息，保留stretch
         while self.chat_layout.count() > 1:
             child = self.chat_layout.takeAt(0)
@@ -1256,6 +1381,62 @@ class MacOSAssistantUI(QMainWindow):
             pass
             
         event.accept()
+
+    def update_intelligence_indicators(self):
+        """更新智能指标显示"""
+        try:
+            # 获取当前架构信息
+            if hasattr(self.assistant, 'user_context'):
+                # 获取最后一次处理的任务架构和复杂度
+                strategies = self.assistant.user_context.get("successful_strategies", {})
+                if strategies:
+                    # 更新架构状态
+                    arch_name_map = {
+                        ArchitectureType.DIRECT: "直接响应",
+                        ArchitectureType.BASIC_COT: "基础思考链",
+                        ArchitectureType.FULL_COT: "完整思考链", 
+                        ArchitectureType.REACT: "ReAct模式",
+                        ArchitectureType.PLANNER: "规划架构"
+                    }
+                    
+                    complexity_name_map = {
+                        TaskComplexity.SIMPLE: "简单",
+                        TaskComplexity.MEDIUM: "中等",
+                        TaskComplexity.COMPLEX: "复杂",
+                        TaskComplexity.ADVANCED: "高级"
+                    }
+                    
+                    # 设置架构名称和颜色
+                    arch_colors = {
+                        ArchitectureType.DIRECT: "#007AFF",      # 蓝色
+                        ArchitectureType.BASIC_COT: "#5cb85c",   # 绿色
+                        ArchitectureType.FULL_COT: "#f0ad4e",    # 橙色
+                        ArchitectureType.REACT: "#d9534f",       # 红色
+                        ArchitectureType.PLANNER: "#9c27b0"      # 紫色
+                    }
+                    
+                    complexity_colors = {
+                        TaskComplexity.SIMPLE: "#28a745",      # 绿色
+                        TaskComplexity.MEDIUM: "#17a2b8",      # 青色
+                        TaskComplexity.COMPLEX: "#fd7e14",     # 橙色
+                        TaskComplexity.ADVANCED: "#dc3545"     # 红色
+                    }
+                    
+                    # 更新架构状态显示
+                    if hasattr(self, 'current_architecture'):
+                        arch_name = arch_name_map.get(self.current_architecture, "直接响应")
+                        arch_color = arch_colors.get(self.current_architecture, "#007AFF")
+                        self.arch_status.setText(arch_name)
+                        self.arch_status.setStyleSheet(f"font-size: 13px; color: {arch_color}; font-weight: 500;")
+                    
+                    # 更新复杂度状态显示
+                    if hasattr(self, 'current_complexity'):
+                        complexity_name = complexity_name_map.get(self.current_complexity, "简单")
+                        complexity_color = complexity_colors.get(self.current_complexity, "#28a745")
+                        self.complexity_status.setText(complexity_name)
+                        self.complexity_status.setStyleSheet(f"font-size: 13px; color: {complexity_color}; font-weight: 500;")
+        except Exception as e:
+            print(f"更新智能指标错误: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
