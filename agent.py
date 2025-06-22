@@ -4,7 +4,7 @@ import subprocess
 import json
 import psutil
 import platform
-from typing import List, Dict, Any, Optional, Generator, Tuple, Union
+from typing import List, Dict, Any, Optional, Generator, Tuple, Union, Callable
 from datetime import datetime
 import threading
 import time
@@ -23,8 +23,19 @@ from langchain_core.callbacks import StreamingStdOutCallbackHandler
 import asyncio
 from langchain_core.callbacks.base import BaseCallbackHandler
 
+# 全局变量，用于工具访问R1增强器
+intelligent_assistant = None
+
 class MacOSTools:
     """macOS系统工具集合"""
+    
+    # 添加一个类变量存储当前的R1增强器
+    r1_enhancer = None
+    
+    @classmethod
+    def set_r1_enhancer(cls, enhancer):
+        """设置R1增强器"""
+        cls.r1_enhancer = enhancer
     
     @staticmethod
     @tool
@@ -243,17 +254,44 @@ CPU: {cpu_info.stdout.strip()}
     @staticmethod
     @tool
     def execute_terminal_command(command: str) -> str:
-        """执行终端命令"""
+        """执行终端命令
+        
+        Args:
+            command: 要执行的终端命令
+            
+        Returns:
+            命令执行结果
+        """
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                return f"命令执行成功:\n{result.stdout}"
-            else:
-                return f"命令执行失败:\n{result.stderr}"
+            # 安全检查
+            dangerous_commands = [
+                "rm -rf", "dd if=", "> /dev/", ":(){ :|:& };:",  # fork炸弹
+                "chmod -R 777 /", "mv / /dev/null"
+            ]
+            
+            for dc in dangerous_commands:
+                if dc in command:
+                    return f"为安全起见，系统拒绝执行包含 '{dc}' 的命令。请确保您的命令是安全的。"
+            
+            # 正常执行命令 - 使用类变量R1增强器
+            if MacOSTools.r1_enhancer and MacOSTools.r1_enhancer.is_available:
+                # 使用R1增强器优化命令
+                optimized_command = MacOSTools.r1_enhancer.optimize_system_command(command)
+                if optimized_command != command:
+                    command = optimized_command
+            
+            # 执行命令并获取输出
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10)
+            output = result.stdout if result.stdout else ""
+            error = result.stderr if result.stderr else ""
+            
+            if error:
+                return f"命令输出:\n{output}\n\n错误输出:\n{error}"
+            return output
         except subprocess.TimeoutExpired:
-            return "命令执行超时"
+            return "命令超时（执行时间超过10秒）"
         except Exception as e:
-            return f"执行命令失败: {str(e)}"
+            return f"执行命令时出错: {str(e)}"
     
     @staticmethod
     @tool
@@ -308,19 +346,37 @@ CPU: {cpu_info.stdout.strip()}
     @staticmethod
     @tool
     def search_files(query: str, directory: str = "/Users") -> str:
-        """搜索文件"""
-        try:
-            # 使用find命令搜索文件
-            command = f'find "{directory}" -name "*{query}*" -type f 2>/dev/null | head -20'
-            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        """搜索文件
+        
+        Args:
+            query: 搜索查询
+            directory: 搜索目录，默认为/Users
             
-            if result.stdout.strip():
-                files = result.stdout.strip().split('\n')
-                return f"找到以下文件:\n" + "\n".join(files)
-            else:
-                return f"在 {directory} 中未找到包含 '{query}' 的文件"
+        Returns:
+            搜索结果
+        """
+        try:
+            # 尝试使用R1增强器进行搜索
+            if MacOSTools.r1_enhancer and MacOSTools.r1_enhancer.is_available:
+                enhanced_results = MacOSTools.r1_enhancer.enhance_file_search(query, directory)
+                if enhanced_results:
+                    result_text = "查找到以下文件:\n\n"
+                    for item in enhanced_results:
+                        result_text += f"{item['path']} (相关度: {item['relevance']})\n"
+                    return result_text
+            
+            # 如果R1增强器不可用或未找到结果，使用基本搜索方法
+            result = subprocess.run(["find", directory, "-name", f"*{query}*", "-type", "f"], 
+                                   capture_output=True, text=True, timeout=10)
+            
+            if not result.stdout.strip():
+                return f"在{directory}中未找到包含'{query}'的文件"
+            
+            files = result.stdout.strip().split('\n')
+            return f"找到以下文件:\n\n" + '\n'.join(files[:10]) + (f"\n\n共找到{len(files)}个文件，仅显示前10个" if len(files) > 10 else "")
+            
         except Exception as e:
-            return f"搜索文件失败: {str(e)}"
+            return f"搜索文件时出错: {str(e)}"
     
     @staticmethod
     @tool
@@ -478,6 +534,318 @@ class EnhancedStreamingHandler(BaseCallbackHandler):
         # 重置状态
         self.response_started = False
 
+class DeepSeekR1Enhancer:
+    """DeepSeek R1模型增强器
+    
+    用于在特定复杂场景下使用DeepSeek R1模型提高系统智能度
+    """
+    
+    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
+        """初始化R1增强器
+        
+        Args:
+            api_key: API密钥
+            base_url: API基础URL
+        """
+        self.api_key = api_key
+        self.base_url = base_url
+        
+        # 创建R1模型LLM (温度较低以提高准确性)
+        try:
+            self.r1_llm = ChatOpenAI(
+                model="deepseek-reasoner",  # deepseek-reasoner模型(推理增强型)
+                openai_api_key=api_key,
+                openai_api_base=base_url,
+                temperature=0.3,  # 较低的温度以获得更确定性的回答
+                streaming=True
+            )
+            self.is_available = True
+        except Exception as e:
+            print(f"初始化DeepSeek Reasoner模型失败: {str(e)}")
+            self.is_available = False
+    
+    def is_complex_technical_query(self, query: str) -> bool:
+        """判断是否为复杂技术查询
+        
+        Args:
+            query: 用户输入
+            
+        Returns:
+            是否为复杂技术查询
+        """
+        # 复杂技术查询关键词
+        technical_keywords = [
+            "编译", "内核", "驱动程序", "文件系统", "进程管理", 
+            "内存管理", "网络协议", "安全漏洞", "性能优化",
+            "系统架构", "代码分析", "调试", "异常处理", 
+            "集成", "API接口", "数据库", "缓存", "并发", 
+            "线程", "同步", "异步", "脚本自动化"
+        ]
+        
+        # 检查是否包含技术关键词
+        for keyword in technical_keywords:
+            if keyword in query:
+                return True
+                
+        # 检查是否为长查询(长查询可能更复杂)
+        if len(query) > 100:
+            return True
+            
+        return False
+    
+    def enhance_complexity_evaluation(self, user_input: str, original_complexity: TaskComplexity) -> TaskComplexity:
+        """增强任务复杂度评估
+        
+        Args:
+            user_input: 用户输入
+            original_complexity: 原始复杂度评估
+            
+        Returns:
+            增强后的复杂度评估
+        """
+        if not self.is_available:
+            return original_complexity
+            
+        # 对特定场景使用更精确的复杂度评估
+        if self.is_complex_technical_query(user_input):
+            try:
+                complexity_prompt = """
+请评估以下macOS相关任务的复杂度，并返回相应的复杂度级别编号:
+1 = 简单任务 (直接查询、单一操作，如查看时间、打开应用)
+2 = 中等任务 (2-3步操作，有条件判断，如查找特定文件) 
+3 = 复杂任务 (多步骤，需要推理，系统诊断，如解决问题)
+4 = 高级任务 (创造性解决方案，复杂诊断，自适应执行)
+
+深入分析考虑:
+- 任务涉及到的系统组件数量
+- 需要的操作步骤
+- 是否需要专业知识
+- 是否需要处理异常情况
+- 是否需要定制化解决方案
+
+只返回一个数字，不要解释。用户任务："{user_input}"
+"""
+                result = self.r1_llm.invoke(complexity_prompt.format(user_input=user_input))
+                complexity_text = result.content.strip()
+                
+                # 提取数字
+                if '1' in complexity_text:
+                    return TaskComplexity.SIMPLE
+                elif '2' in complexity_text:
+                    return TaskComplexity.MEDIUM
+                elif '3' in complexity_text:
+                    return TaskComplexity.COMPLEX
+                else:
+                    return TaskComplexity.ADVANCED
+            except:
+                return original_complexity
+        
+        return original_complexity
+    
+    def generate_advanced_plan(self, user_input: str) -> str:
+        """使用R1模型生成高级执行计划
+        
+        Args:
+            user_input: 用户输入
+            
+        Returns:
+            详细的执行计划
+        """
+        if not self.is_available:
+            return ""
+            
+        try:
+            planning_prompt = f"""
+针对用户在macOS环境下的以下请求，制定一个详细的执行计划:
+
+用户请求: {user_input}
+
+请提供以下内容:
+1. 任务分解: 将主要任务分解为具体子任务
+2. 工具选择: 每个子任务使用哪些macOS命令行工具或系统API
+3. 执行顺序: 子任务的最佳执行顺序
+4. 依赖关系: 子任务之间的依赖关系
+5. 潜在问题: 可能遇到的问题和解决方案
+
+请以结构化格式回答，使计划清晰可执行。
+"""
+            result = self.r1_llm.invoke(planning_prompt)
+            return result.content
+        except Exception as e:
+            print(f"生成高级计划失败: {str(e)}")
+            return ""
+    
+    def optimize_system_command(self, command: str) -> str:
+        """优化系统命令
+        
+        Args:
+            command: 原始命令
+            
+        Returns:
+            优化后的命令
+        """
+        if not self.is_available or not command:
+            return command
+            
+        try:
+            optimization_prompt = f"""
+请优化以下macOS终端命令，提高其效率、安全性和可靠性:
+
+原始命令: {command}
+
+请考虑:
+1. 安全性改进 (避免潜在风险或数据损失)
+2. 效率优化 (更快执行或使用更高效的选项)
+3. 错误处理 (添加错误检测或条件执行)
+4. 可读性 (如果有助于维护但不影响功能)
+
+只返回优化后的命令，不要解释。如果原命令已经最优，则返回原命令。
+"""
+            result = self.r1_llm.invoke(optimization_prompt)
+            optimized = result.content.strip()
+            
+            # 如果优化结果为空或异常，返回原命令
+            if not optimized or len(optimized) < len(command) / 2:
+                return command
+                
+            return optimized
+        except:
+            return command
+    
+    def analyze_error(self, error_message: str, original_command: str) -> Dict[str, str]:
+        """分析错误并提供修复建议
+        
+        Args:
+            error_message: 错误消息
+            original_command: 导致错误的原始命令
+            
+        Returns:
+            包含错误分析和修复建议的字典
+        """
+        if not self.is_available:
+            return {"analysis": "", "fix": ""}
+            
+        try:
+            error_prompt = f"""
+分析以下在macOS终端执行命令时遇到的错误，并提供修复建议:
+
+原始命令: {original_command}
+错误消息: {error_message}
+
+请提供:
+1. 简洁的错误根本原因分析
+2. 推荐的修复命令
+
+以JSON格式回答，包含两个字段: "analysis"和"fix"
+"""
+            result = self.r1_llm.invoke(error_prompt)
+            
+            # 尝试从回复中提取JSON
+            content = result.content
+            try:
+                import json
+                # 查找JSON内容
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+                if start_idx >= 0 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                    return json.loads(json_str)
+            except:
+                # 如果JSON解析失败，手动提取关键内容
+                analysis = ""
+                fix = ""
+                
+                if "分析" in content or "原因" in content:
+                    analysis_start = content.find("分析") if "分析" in content else content.find("原因")
+                    analysis_end = content.find("修复") if "修复" in content else len(content)
+                    analysis = content[analysis_start:analysis_end].strip()
+                
+                if "修复" in content or "建议" in content:
+                    fix_start = content.find("修复") if "修复" in content else content.find("建议")
+                    fix_end = len(content)
+                    fix = content[fix_start:fix_end].strip()
+                    
+                    # 尝试提取命令
+                    if "`" in fix:
+                        start_cmd = fix.find("`")
+                        end_cmd = fix.find("`", start_cmd + 1)
+                        if end_cmd > start_cmd:
+                            fix = fix[start_cmd+1:end_cmd]
+                
+                return {"analysis": analysis, "fix": fix}
+                
+            return {"analysis": "无法分析错误", "fix": ""}
+        except Exception as e:
+            print(f"分析错误失败: {str(e)}")
+            return {"analysis": "", "fix": ""}
+    
+    def enhance_file_search(self, query: str, directory: str) -> List[Dict[str, str]]:
+        """增强文件搜索功能
+        
+        Args:
+            query: 搜索查询
+            directory: 搜索目录
+            
+        Returns:
+            增强的搜索结果
+        """
+        if not self.is_available:
+            return []
+            
+        try:
+            # 使用R1模型生成更智能的搜索命令
+            search_prompt = f"""
+为在macOS上查找以下文件，生成一个高效、准确的find或mdfind命令:
+
+搜索查询: {query}
+搜索目录: {directory}
+
+考虑:
+1. 根据查询特点选择合适的搜索工具(find适合精确路径搜索，mdfind适合内容搜索)
+2. 加入适当的过滤条件(文件类型、大小、修改时间等)
+3. 排序方式(最近修改、名称相关性等)
+4. 搜索深度限制(避免过深遍历)
+
+只返回一个完整的命令，不要解释。
+"""
+            result = self.r1_llm.invoke(search_prompt)
+            search_command = result.content.strip()
+            
+            if not search_command or len(search_command) < 10:
+                return []
+                
+            # 提取实际命令(如果有代码块标记)
+            if "```" in search_command:
+                parts = search_command.split("```")
+                for part in parts:
+                    if part.strip() and not part.startswith("bash") and not part.startswith("sh"):
+                        search_command = part.strip()
+                        break
+            
+            # 执行搜索命令并解析结果
+            import subprocess
+            try:
+                result = subprocess.run(search_command, shell=True, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    files = result.stdout.strip().split('\n')
+                    enhanced_results = []
+                    
+                    for file in files[:10]:  # 限制为前10个结果
+                        if file.strip():
+                            enhanced_results.append({
+                                "path": file.strip(),
+                                "relevance": "高"  # 可以进一步改进相关性评分
+                            })
+                    
+                    return enhanced_results
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"增强文件搜索失败: {str(e)}")
+            
+        return []
+
 class IntelligentMacOSAssistant:
     """增强智能的macOS系统助手"""
     
@@ -493,6 +861,15 @@ class IntelligentMacOSAssistant:
             temperature=0.7,
             streaming=True  # 启用流式响应
         )
+        
+        # 创建R1增强器
+        self.r1_enhancer = DeepSeekR1Enhancer(api_key, base_url)
+        
+        # 注册R1增强器到MacOSTools类
+        MacOSTools.set_r1_enhancer(self.r1_enhancer)
+        
+        # 初始化use_r1_enhancement标志
+        self.use_r1_enhancement = False
         
         # 获取所有工具
         self.tools = [
@@ -668,24 +1045,13 @@ class IntelligentMacOSAssistant:
     
     def _evaluate_task_complexity(self, user_input: str) -> TaskComplexity:
         """评估任务复杂度"""
-        # 任务复杂度评估提示
-        complexity_prompt = """
-请评估以下用户请求的复杂度，并返回相应的复杂度级别编号:
-1 = 简单任务 (直接查询、单一操作，如查看时间、打开应用)
-2 = 中等任务 (2-3步操作，有条件判断，如查找特定文件) 
-3 = 复杂任务 (多步骤，需要推理，系统诊断，如解决问题)
-4 = 高级任务 (创造性解决方案，复杂诊断，自适应执行)
-
-只返回一个数字，不要解释。用户请求："{user_input}"
-"""
-        
         try:
-            # 检查是否已有相似请求的复杂度评估
+            # 首先检查是否已有相似请求的复杂度评估
             for task, complexity in self.user_context["common_tasks"].items():
                 if self._calculate_similarity(task, user_input) > 0.8:  # 80%相似度阈值
                     return complexity
             
-            # 检查关键词模式
+            # 使用基本方法评估任务复杂度
             # 简单任务
             simple_patterns = [
                 r"时间|现在几点", 
@@ -721,41 +1087,55 @@ class IntelligentMacOSAssistant:
             # 检查模式匹配
             for pattern in simple_patterns:
                 if re.search(pattern, user_input):
-                    self.user_context["common_tasks"][user_input] = TaskComplexity.SIMPLE
-                    return TaskComplexity.SIMPLE
-                    
-            for pattern in medium_patterns:
-                if re.search(pattern, user_input):
-                    self.user_context["common_tasks"][user_input] = TaskComplexity.MEDIUM
-                    return TaskComplexity.MEDIUM
-                    
-            for pattern in complex_patterns:
-                if re.search(pattern, user_input):
-                    self.user_context["common_tasks"][user_input] = TaskComplexity.COMPLEX
-                    return TaskComplexity.COMPLEX
-                    
-            for pattern in advanced_patterns:
-                if re.search(pattern, user_input):
-                    self.user_context["common_tasks"][user_input] = TaskComplexity.ADVANCED
-                    return TaskComplexity.ADVANCED
-            
-            # 使用LLM评估复杂度
-            result = self.llm.invoke(complexity_prompt.format(user_input=user_input))
-            complexity_text = result.content.strip()
-            
-            # 提取数字
-            if '1' in complexity_text:
-                complexity = TaskComplexity.SIMPLE
-            elif '2' in complexity_text:
-                complexity = TaskComplexity.MEDIUM
-            elif '3' in complexity_text:
-                complexity = TaskComplexity.COMPLEX
+                    initial_complexity = TaskComplexity.SIMPLE
+                    break
             else:
-                complexity = TaskComplexity.ADVANCED
+                for pattern in medium_patterns:
+                    if re.search(pattern, user_input):
+                        initial_complexity = TaskComplexity.MEDIUM
+                        break
+                else:
+                    for pattern in complex_patterns:
+                        if re.search(pattern, user_input):
+                            initial_complexity = TaskComplexity.COMPLEX
+                            break
+                    else:
+                        for pattern in advanced_patterns:
+                            if re.search(pattern, user_input):
+                                initial_complexity = TaskComplexity.ADVANCED
+                                break
+                        else:
+                            # 使用LLM评估复杂度
+                            complexity_prompt = """
+请评估以下用户请求的复杂度，并返回相应的复杂度级别编号:
+1 = 简单任务 (直接查询、单一操作，如查看时间、打开应用)
+2 = 中等任务 (2-3步操作，有条件判断，如查找特定文件) 
+3 = 复杂任务 (多步骤，需要推理，系统诊断，如解决问题)
+4 = 高级任务 (创造性解决方案，复杂诊断，自适应执行)
+
+只返回一个数字，不要解释。用户请求："{user_input}"
+"""
+                            result = self.llm.invoke(complexity_prompt.format(user_input=user_input))
+                            complexity_text = result.content.strip()
+                            
+                            # 提取数字
+                            if '1' in complexity_text:
+                                initial_complexity = TaskComplexity.SIMPLE
+                            elif '2' in complexity_text:
+                                initial_complexity = TaskComplexity.MEDIUM
+                            elif '3' in complexity_text:
+                                initial_complexity = TaskComplexity.COMPLEX
+                            else:
+                                initial_complexity = TaskComplexity.ADVANCED
+            
+            # 使用R1增强器进一步评估复杂度
+            final_complexity = self.r1_enhancer.enhance_complexity_evaluation(
+                user_input, initial_complexity
+            )
             
             # 保存到用户上下文
-            self.user_context["common_tasks"][user_input] = complexity
-            return complexity
+            self.user_context["common_tasks"][user_input] = final_complexity
+            return final_complexity
             
         except Exception as e:
             print(f"复杂度评估错误: {str(e)}")
@@ -785,7 +1165,7 @@ class IntelligentMacOSAssistant:
         return architecture_map[complexity]
     
     def _get_executor_for_architecture(self, architecture: ArchitectureType):
-        """获取指定架构类型的执行器"""
+        """获取指定架构类型的执行器，对于复杂架构进行R1增强"""
         executor_map = {
             ArchitectureType.DIRECT: self.direct_executor,
             ArchitectureType.BASIC_COT: self.basic_cot_executor,
@@ -793,7 +1173,18 @@ class IntelligentMacOSAssistant:
             ArchitectureType.REACT: self.react_executor,
             ArchitectureType.PLANNER: self.planner_executor
         }
-        return executor_map[architecture]
+        
+        executor = executor_map[architecture]
+        
+        # 对于PLANNER和REACT架构，可以考虑使用R1增强器
+        if architecture in [ArchitectureType.PLANNER, ArchitectureType.REACT] and self.r1_enhancer.is_available:
+            # 这里不直接修改执行器，而是记录使用R1增强器的标志
+            # 实际增强会在chat_stream和stream_with_handler中进行
+            self.use_r1_enhancement = True
+        else:
+            self.use_r1_enhancement = False
+            
+        return executor
     
     def _track_success(self, complexity: TaskComplexity, architecture: ArchitectureType, successful: bool = True):
         """跟踪策略成功率"""
@@ -822,7 +1213,17 @@ class IntelligentMacOSAssistant:
         return intersection / union if union > 0 else 0.0
     
     def chat_stream(self, user_input: str) -> Generator[str, None, None]:
-        """处理用户输入并返回流式响应"""
+        """根据用户输入生成流式AI响应
+        
+        使用智能任务复杂度评估和架构选择流水线处理用户请求
+        如果遇到错误，会自动尝试使用更复杂的架构模型重试
+        
+        Args:
+            user_input: 用户输入文本
+            
+        Returns:
+            生成文本块的生成器
+        """
         try:
             # 任务计数增加
             self.task_counter += 1
@@ -836,8 +1237,18 @@ class IntelligentMacOSAssistant:
             # 3. 获取对应的执行器
             executor = self._get_executor_for_architecture(architecture)
             
-            # 4. 执行流式响应
+            # 4. 对于复杂任务，使用R1增强器生成高级执行计划
+            enhanced_input = user_input
+            if self.use_r1_enhancement and complexity in [TaskComplexity.COMPLEX, TaskComplexity.ADVANCED]:
+                plan = self.r1_enhancer.generate_advanced_plan(user_input)
+                if plan:
+                    # 构建增强后的输入，包含计划信息
+                    enhanced_input = f"{user_input}\n\n[系统提示：参考以下执行计划]\n{plan}"
+            
+            # 5. 执行流式响应
             buffer = []  # 用于存储收到的令牌
+            full_response = ""
+            success = True
             
             # 定义Token处理回调函数
             def token_callback(token):
@@ -850,15 +1261,12 @@ class IntelligentMacOSAssistant:
                 streaming_callback=token_callback
             )
             
-            full_response = ""
-            success = True
-            
             try:
-                # 使用自定义处理器
+                # 设置流式响应配置
                 stream_config = {"callbacks": [streaming_handler]}
                 
                 for chunk in executor.stream({
-                    "input": user_input,
+                    "input": enhanced_input,
                     "chat_history": self.chat_history
                 }, config=stream_config):
                     if "output" in chunk:
@@ -867,6 +1275,7 @@ class IntelligentMacOSAssistant:
                         if new_text and new_text != full_response:
                             # 只返回新增的部分
                             delta = new_text[len(full_response):]
+                            full_response = new_text
                             if delta:
                                 yield delta
                             
@@ -875,20 +1284,24 @@ class IntelligentMacOSAssistant:
                                 token = buffer.pop(0)
                                 if token:  # 避免空令牌
                                     yield token
-                                    
-                            full_response = new_text
                 
                 # 处理任何剩余的缓冲区内容
                 while buffer:
                     token = buffer.pop(0)
                     if token:
                         yield token
-                        
             except Exception as e:
                 error_msg = f"执行失败: {str(e)}"
                 yield f"\n{error_msg}\n正在尝试使用更高级的架构..."
                 
-                # 如果失败，尝试升级到更复杂的架构
+                # 如果失败，尝试使用R1增强器分析错误
+                error_analysis = self.r1_enhancer.analyze_error(str(e), user_input)
+                if error_analysis["analysis"] or error_analysis["fix"]:
+                    yield f"\n错误分析: {error_analysis['analysis']}"
+                    if error_analysis["fix"]:
+                        yield f"\n修复建议: {error_analysis['fix']}"
+                
+                # 尝试升级到更复杂的架构
                 success = False
                 if architecture != ArchitectureType.PLANNER:
                     # 获取下一级架构
@@ -897,7 +1310,7 @@ class IntelligentMacOSAssistant:
                     
                     try:
                         result = next_executor.invoke({
-                            "input": user_input,
+                            "input": enhanced_input,
                             "chat_history": self.chat_history
                         })
                         yield f"\n使用高级架构重试成功:\n{result['output']}"
@@ -912,11 +1325,11 @@ class IntelligentMacOSAssistant:
                         # 记录失败
                         self._track_success(complexity, next_architecture, False)
             
-            # 5. 更新聊天历史
+            # 6. 更新聊天历史
             self.chat_history.append(HumanMessage(content=user_input))
             self.chat_history.append(AIMessage(content=full_response))
             
-            # 6. 跟踪成功率
+            # 7. 跟踪成功率
             if success:
                 self.success_counter += 1
                 self._track_success(complexity, architecture, True)
@@ -957,15 +1370,7 @@ class IntelligentMacOSAssistant:
         }
     
     def stream_with_handler(self, user_input: str, custom_handler) -> Generator[str, None, None]:
-        """使用自定义处理器的流式输出
-        
-        Args:
-            user_input: 用户输入文本
-            custom_handler: 自定义回调处理器(EnhancedStreamingHandler实例)
-            
-        Returns:
-            生成文本块的生成器
-        """
+        """使用自定义处理器的流式输出，支持R1增强"""
         try:
             # 任务计数增加
             self.task_counter += 1
@@ -979,7 +1384,15 @@ class IntelligentMacOSAssistant:
             # 3. 获取对应的执行器
             executor = self._get_executor_for_architecture(architecture)
             
-            # 4. 执行流式响应
+            # 4. 对于复杂任务，使用R1增强器生成高级执行计划
+            enhanced_input = user_input
+            if self.use_r1_enhancement and complexity in [TaskComplexity.COMPLEX, TaskComplexity.ADVANCED]:
+                plan = self.r1_enhancer.generate_advanced_plan(user_input)
+                if plan:
+                    # 构建增强后的输入，包含计划信息
+                    enhanced_input = f"{user_input}\n\n[系统提示：参考以下执行计划]\n{plan}"
+            
+            # 5. 执行流式响应
             full_response = ""
             success = True
             
@@ -988,7 +1401,7 @@ class IntelligentMacOSAssistant:
                 stream_config = {"callbacks": [custom_handler]}
                 
                 for chunk in executor.stream({
-                    "input": user_input,
+                    "input": enhanced_input,
                     "chat_history": self.chat_history
                 }, config=stream_config):
                     if "output" in chunk:
@@ -1004,7 +1417,14 @@ class IntelligentMacOSAssistant:
                 error_msg = f"执行失败: {str(e)}"
                 yield f"\n{error_msg}\n正在尝试使用更高级的架构..."
                 
-                # 如果失败，尝试升级到更复杂的架构
+                # 如果失败，尝试使用R1增强器分析错误
+                error_analysis = self.r1_enhancer.analyze_error(str(e), user_input)
+                if error_analysis["analysis"] or error_analysis["fix"]:
+                    yield f"\n错误分析: {error_analysis['analysis']}"
+                    if error_analysis["fix"]:
+                        yield f"\n修复建议: {error_analysis['fix']}"
+                
+                # 尝试升级到更复杂的架构
                 success = False
                 if architecture != ArchitectureType.PLANNER:
                     # 获取下一级架构
@@ -1013,7 +1433,7 @@ class IntelligentMacOSAssistant:
                     
                     try:
                         result = next_executor.invoke({
-                            "input": user_input,
+                            "input": enhanced_input,
                             "chat_history": self.chat_history
                         })
                         yield f"\n使用高级架构重试成功:\n{result['output']}"
@@ -1028,11 +1448,11 @@ class IntelligentMacOSAssistant:
                         # 记录失败
                         self._track_success(complexity, next_architecture, False)
             
-            # 5. 更新聊天历史
+            # 6. 更新聊天历史
             self.chat_history.append(HumanMessage(content=user_input))
             self.chat_history.append(AIMessage(content=full_response))
             
-            # 6. 跟踪成功率
+            # 7. 跟踪成功率
             if success:
                 self.success_counter += 1
                 self._track_success(complexity, architecture, True)
@@ -1222,67 +1642,61 @@ class MacOSAssistant:
             yield error_msg
 
 def main():
-    """主函数 - 命令行界面"""
-    # 使用现有的API密钥
-    api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
+    """主函数"""
+    global intelligent_assistant
     
-    print("🤖 macOS系统助手启动中...")
-    print("=" * 50)
-    print("版本: 1.1.0 (增强流式输出)")
-    print("最后更新: " + datetime.now().strftime("%Y-%m-%d"))
-    print("=" * 50)
+    # 初始化PySide6应用
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")  # 使用Fusion风格，更接近原生macOS
     
-    # 使用增强智能助手
-    assistant = IntelligentMacOSAssistant(api_key)
+    # 设置深色模式检测
+    darkmode_script = '''
+    tell application "System Events"
+        tell appearance preferences
+            return dark mode
+        end tell
+    end tell
+    '''
     
-    print("✅ 助手已准备就绪！")
-    print("💡 你可以询问我关于macOS系统的任何问题")
-    print("💡 例如：'打开Safari'、'查看系统信息'、'搜索文件'等")
-    print("💡 输入 'quit' 或 'exit' 退出")
-    print("=" * 50)
+    # 尝试检测系统黑暗模式
+    try:
+        proc = subprocess.run(['osascript', '-e', darkmode_script], 
+                             capture_output=True, text=True, check=True)
+        is_dark_mode = proc.stdout.strip().lower() == 'true'
+    except:
+        is_dark_mode = False  # 如果无法检测，默认为浅色模式
     
-    while True:
-        try:
-            user_input = input("\n👤 你: ").strip()
-            
-            if user_input.lower() in ['quit', 'exit', '退出']:
-                print("👋 再见！")
-                break
-            
-            if not user_input:
-                continue
-            
-            print("\n🤖 助手: ", end="", flush=True)
-            
-            # 使用流式响应
-            # 创建自定义处理器
-            def on_token(token):
-                print(token, end="", flush=True)
-            
-            streaming_handler = EnhancedStreamingHandler(
-                streaming_callback=on_token,
-                start_callback=lambda: print("(思考中...)", end="", flush=True),
-                thinking_callback=lambda is_thinking: print("." if is_thinking else "", end="", flush=True),
-                end_callback=lambda: print("(完成)", end="", flush=True)
-            )
-            
-            # 使用自定义处理器的流式输出
-            try:
-                # 使用流式输出，但仅收集结果
-                result = ""
-                for chunk in assistant.stream_with_handler(user_input, streaming_handler):
-                    result += chunk
-                # 结果已经在回调中打印，不需要再次打印
-            except Exception as e:
-                print(f"\n❌ 流式输出错误: {str(e)}")
-            
-            print()  # 换行
-            
-        except KeyboardInterrupt:
-            print("\n👋 再见！")
-            break
-        except Exception as e:
-            print(f"\n❌ 发生错误: {str(e)}")
+    # 获取API密钥
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("请设置OPENAI_API_KEY环境变量")
+        sys.exit(1)
+    
+    # 初始化智能助手
+    try:
+        # 使用增强智能助手
+        intelligent_assistant = IntelligentMacOSAssistant(api_key=api_key)
+        
+        def on_token(token):
+            """处理流式tokens"""
+            print(token, end="", flush=True)
+        
+        print("测试助手功能...", end="", flush=True)
+        # 简单测试
+        for chunk in intelligent_assistant.chat_stream("获取当前时间"):
+            on_token(chunk)
+        print("\n助手初始化完成!\n")
+        
+    except Exception as e:
+        print(f"初始化智能助手失败，将使用基础助手: {str(e)}")
+        intelligent_assistant = MacOSAssistant(api_key=api_key)
+    
+    # 创建主窗口
+    window = MainWindow(intelligent_assistant, is_dark_mode)
+    window.show()
+    
+    # 执行应用
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

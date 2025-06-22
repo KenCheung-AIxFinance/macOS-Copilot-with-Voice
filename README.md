@@ -153,7 +153,7 @@ Safari.app, Google Chrome.app, Terminal.app, Calculator.app...
 
 <div align="center">
 
-![主界面](https://via.placeholder.com/800x500/007AFF/FFFFFF?text=macOS+Copilot+主界面)
+![主界面](img/main-screen.png)
 *现代化的图形用户界面，支持语音交互和系统管理*
 
 </div>
@@ -272,37 +272,3 @@ git push origin feature/amazing-feature
 
 # 6. 创建Pull Request
 ```
-
-### 📝 贡献类型
-- 🐛 Bug报告
-- 💡 功能建议
-- 📚 文档改进
-- 🎨 UI/UX优化
-- ⚡ 性能优化
-
----
-
-## 📄 许可证
-
-本项目采用 [MIT License](LICENSE) 许可证。
-
----
-
-## 📞 联系我们
-
-- 🐛 **问题反馈**: [GitHub Issues](https://github.com/yourusername/macOS-Copilot/issues)
-- 💬 **讨论交流**: [GitHub Discussions](https://github.com/yourusername/macOS-Copilot/discussions)
-- 📧 **邮件联系**: your-email@example.com
-
----
-
-<div align="center">
-
-**⭐ 如果这个项目对您有帮助，请给我们一个Star！**
-
-[![GitHub stars](https://img.shields.io/github/stars/yourusername/macOS-Copilot?style=social)](https://github.com/yourusername/macOS-Copilot)
-[![GitHub forks](https://img.shields.io/github/forks/yourusername/macOS-Copilot?style=social)](https://github.com/yourusername/macOS-Copilot)
-
-**🎯 让macOS更智能，让生活更简单**
-
-</div> 

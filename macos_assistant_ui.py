@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QTextEdit, QPushButton, QLabel, QFrame,
                             QScrollArea, QSplitter, QListWidget, QListWidgetItem,
                             QTextBrowser, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize
-from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QTextCursor, QTextOption
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QPropertyAnimation, QEasingCurve, QPoint, QRectF, pyqtProperty
+from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QTextCursor, QTextOption, QBrush, QPen, QPainter, QPainterPath
 import speech_recognition as sr
 import edge_tts
 import asyncio
@@ -247,55 +247,21 @@ class StatusLabel(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumHeight(50)
 
-class TypingIndicator(QLabel):
-    """打字效果指示器，用于显示AI正在输入的状态"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.dots_count = 0
-        self.max_dots = 3
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_dots)
-        self.setStyleSheet("""
-            QLabel {
-                color: #007AFF;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 10px;
-                background-color: #f8f9fa;
-                border-radius: 5px;
-            }
-        """)
-        self.hide()
-        
-    def start(self):
-        """开始显示打字指示器"""
-        self.dots_count = 0
-        self.update_dots()
-        self.show()
-        self.timer.start(500)  # 每500毫秒更新一次
-        
-    def stop(self):
-        """停止显示打字指示器"""
-        self.timer.stop()
-        self.hide()
-        
-    def update_dots(self):
-        """更新点的数量来创建动画效果"""
-        self.dots_count = (self.dots_count + 1) % (self.max_dots + 1)
-        dots = "." * self.dots_count
-        self.setText(f"AI正在输入{dots}")
-
 class ChatBubble(QFrame):
     def __init__(self, text, is_user=True, parent=None):
         super().__init__(parent)
         self.is_user = is_user
         self.current_text = text  # 保存当前文本内容
         self.typing_indicator = None
+        self.breathing_dots = None
         
         if not is_user:
-            # 只为助手消息添加打字指示器
-            self.typing_indicator = TypingIndicator(self)
-            self.typing_indicator.hide()
+            # 只为助手消息添加动画指示器
+            self.breathing_dots = BreathingDotIndicator(self, 
+                                                     dot_color="#007AFF", 
+                                                     dot_count=3, 
+                                                     dot_size=8)
+            self.breathing_dots.hide()
         
         # 设置样式 - 全宽设计
         if is_user:
@@ -434,6 +400,47 @@ class ChatBubble(QFrame):
                     background-color: #f8f9fa;
                     font-weight: bold;
                 }
+                /* 自定义文本浏览器滚动条 */
+                QScrollBar:vertical {
+                    background: transparent;
+                    width: 10px;
+                    margin: 1px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical {
+                    background: rgba(160, 160, 160, 0.3);
+                    min-height: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: rgba(160, 160, 160, 0.6);
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                    background: none;
+                }
+                QScrollBar:horizontal {
+                    background: transparent;
+                    height: 10px;
+                    margin: 1px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: rgba(160, 160, 160, 0.3);
+                    min-width: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: rgba(160, 160, 160, 0.6);
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px;
+                }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                    background: none;
+                }
             """)
         
         # 处理Markdown内容
@@ -452,6 +459,14 @@ class ChatBubble(QFrame):
         
         # 修正气泡宽度
         self.adjustWidth()
+        
+        # 如果是助手气泡，确保呼吸动画在适当的位置
+        if not is_user and self.breathing_dots:
+            # 放在文本区域顶部中央
+            self.breathing_dots.move(
+                self.width() // 2 - self.breathing_dots.width() // 2, 
+                self.text_browser.pos().y() + 10
+            )
     
     def update_text(self, text):
         """更新文本内容（支持流式更新）"""
@@ -477,15 +492,30 @@ class ChatBubble(QFrame):
         self.adjustWidth()
     
     def start_typing_indicator(self):
-        """开始显示打字指示器"""
-        if self.typing_indicator and self.current_text == "":
-            self.typing_indicator.start()
+        """开始显示输入指示器"""
+        if self.breathing_dots and self.current_text == "":
+            # 更新位置确保居中
+            self.breathing_dots.move(
+                self.width() // 2 - self.breathing_dots.width() // 2, 
+                self.text_browser.pos().y() + 10
+            )
+            self.breathing_dots.start_animation()
     
     def stop_typing_indicator(self):
-        """停止显示打字指示器"""
-        if self.typing_indicator:
-            self.typing_indicator.stop()
-            
+        """停止显示输入指示器"""
+        if self.breathing_dots:
+            self.breathing_dots.stop_animation()
+    
+    def resizeEvent(self, event):
+        """重绘事件，更新呼吸动画位置"""
+        super().resizeEvent(event)
+        # 更新呼吸动画位置
+        if self.breathing_dots:
+            self.breathing_dots.move(
+                self.width() // 2 - self.breathing_dots.width() // 2, 
+                self.text_browser.pos().y() + 10
+            )
+    
     def append_text(self, text_chunk):
         """追加文本内容（用于流式显示）"""
         # 如果有文本开始出现，停止打字指示器
@@ -537,6 +567,107 @@ class ChatBubble(QFrame):
         self.updateGeometry()
         self.adjustSize()
 
+class BreathingDotIndicator(QWidget):
+    """渐变呼吸动画的圆点加载指示器"""
+    def __init__(self, parent=None, dot_color="#007AFF", dot_count=3, dot_size=10):
+        super().__init__(parent)
+        
+        # 基本配置
+        self.dot_color = dot_color      # 圆点颜色
+        self.dot_count = dot_count      # 圆点数量
+        self.dot_size = dot_size        # 圆点大小
+        self.dot_spacing = dot_size*2   # 圆点间距
+        self.opacity_values = [0.3] * dot_count  # 每个圆点的不透明度
+        
+        # 设置组件大小
+        width = dot_count * dot_size * 3
+        height = dot_size * 3
+        self.setFixedSize(width, height)
+        
+        # 设置动画
+        self.animations = []
+        self.setup_animations()
+        
+        # 初始隐藏
+        self.hide()
+    
+    def setup_animations(self):
+        """设置动画效果"""
+        delay = 200  # 动画延迟时间(毫秒)
+        
+        for i in range(self.dot_count):
+            # 为每个点创建不透明度变化动画
+            anim = QPropertyAnimation(self, b"opacity" + str(i).encode())
+            anim.setDuration(1200)  # 动画持续时间
+            anim.setStartValue(0.2)
+            anim.setEndValue(1.0)
+            anim.setLoopCount(-1)    # 无限循环
+            anim.setEasingCurve(QEasingCurve.Type.InOutQuad)  # 动画曲线
+            
+            # 设置自动反向，产生呼吸效果
+            anim.setDirection(QPropertyAnimation.Direction.Forward)
+            
+            # 添加延迟，使每个点的动画错开
+            # 不使用setStartTime，而是在启动动画时使用QTimer实现延迟
+            self.animations.append((anim, i * delay))
+    
+    def start_animation(self):
+        """开始动画，带有错开延迟效果"""
+        self.show()
+        
+        # 启动每个动画，使用QTimer实现延迟
+        for anim, delay in self.animations:
+            # 为每个动画创建单独的延时启动
+            QTimer.singleShot(delay, lambda a=anim: a.start())
+    
+    def stop_animation(self):
+        """停止动画"""
+        for anim, _ in self.animations:
+            anim.stop()
+        self.hide()
+    
+    # 动态属性访问器
+    def get_opacity(self, index):
+        return self.opacity_values[index]
+    
+    def set_opacity(self, index, value):
+        if 0 <= index < len(self.opacity_values):
+            self.opacity_values[index] = value
+            self.update()  # 触发重绘
+    
+    # 动态创建属性
+    for i in range(10):  # 足够多的点
+        locals()[f'opacity{i}'] = pyqtProperty(float, 
+                                      lambda self, i=i: self.get_opacity(i), 
+                                      lambda self, val, i=i: self.set_opacity(i, val))
+    
+    def paintEvent(self, event):
+        """绘制事件，渲染圆点"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)  # 抗锯齿
+        
+        # 圆点基本参数
+        x_center = self.width() // 2
+        y_center = self.height() // 2
+        radius = self.dot_size // 2
+        spacing = self.dot_spacing
+        
+        # 计算第一个点的位置
+        x_start = x_center - ((self.dot_count - 1) * spacing) // 2
+        
+        for i in range(self.dot_count):
+            x = x_start + i * spacing
+            
+            # 设置颜色和不透明度
+            color = QColor(self.dot_color)
+            color.setAlphaF(self.opacity_values[i])
+            
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.PenStyle.NoPen)  # 无边框
+            
+            # 绘制圆点
+            painter.drawEllipse(QPoint(x, y_center), radius, radius)
+
 class MacOSAssistantUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -585,18 +716,53 @@ class MacOSAssistantUI(QMainWindow):
                 border: none;
                 background-color: transparent;
             }
+            /* 新的滚动条样式 */
             QScrollBar:vertical {
-                background-color: #f0f0f0;
-                width: 8px;
-                border-radius: 4px;
+                background: transparent;
+                width: 12px;
+                margin: 0px;
+                border-radius: 6px;
             }
             QScrollBar::handle:vertical {
-                background-color: #c0c0c0;
-                border-radius: 4px;
-                min-height: 20px;
+                background: #c0c0c0;
+                min-height: 30px;
+                border-radius: 6px;
             }
             QScrollBar::handle:vertical:hover {
-                background-color: #a0a0a0;
+                background: #a0a0a0;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #808080;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            /* 水平滚动条样式 */
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 12px;
+                margin: 0px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #c0c0c0;
+                min-width: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #a0a0a0;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #808080;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
             }
         """)
         
@@ -772,6 +938,27 @@ class MacOSAssistantUI(QMainWindow):
                 background-color: #e3f2fd;
                 color: #1976d2;
             }
+            /* 自定义侧边栏列表滚动条 */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 2px 2px 2px 2px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 0.3);
+                min-height: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(180, 180, 180, 0.7);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
         """)
         sidebar_layout.addWidget(self.preset_list)
         
@@ -828,6 +1015,31 @@ class MacOSAssistantUI(QMainWindow):
             QScrollArea {
                 background-color: #ffffff;
                 border: none;
+            }
+            /* 自定义聊天区域滚动条 */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 14px;
+                margin: 2px;
+                border-radius: 7px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(160, 160, 160, 0.5);
+                min-height: 30px;
+                border-radius: 7px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(160, 160, 160, 0.8);
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: rgba(128, 128, 128, 0.9);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
             }
         """)
         
@@ -1016,6 +1228,27 @@ class MacOSAssistantUI(QMainWindow):
             QTextEdit:focus {
                 border: 1px solid #007AFF;
             }
+            /* 自定义输入框滚动条 */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 12px;
+                margin: 2px 2px 2px 2px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(160, 160, 160, 0.4);
+                min-height: 25px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(160, 160, 160, 0.7);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
         """)
         input_row.addWidget(self.input_text, 1)
         
@@ -1183,6 +1416,30 @@ class MacOSAssistantUI(QMainWindow):
     def handle_error(self, error_msg):
         """处理错误"""
         self.update_status(f"错误: {error_msg}")
+        
+        # 恢复发送按钮状态
+        self.send_button.setText(" 发 送 ")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                font-weight: 600;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #0056CC;
+            }
+            QPushButton:pressed {
+                background-color: #004499;
+            }
+        """)
+        
+        # 关闭任何活动的指示器
+        if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
+            self.current_assistant_bubble.stop_typing_indicator()
     
     def update_status(self, status):
         """更新状态"""
@@ -1198,9 +1455,28 @@ class MacOSAssistantUI(QMainWindow):
         self.add_message("你", text)
         self.input_text.clear()
         
-        # 禁用发送按钮防止重复发送
-        self.send_button.setEnabled(False)
+        # 设置发送按钮状态，而不是禁用它
+        self.send_button.setText(" 发送中... ")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #a0a0a0;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                font-weight: 600;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #a0a0a0;
+            }
+        """)
         
+        # 延迟100ms后启动流式处理，让UI能够更新
+        QTimer.singleShot(100, lambda: self._process_message(text))
+        
+    def _process_message(self, text):
+        """异步处理消息，避免阻塞UI"""
         # 更新状态
         self.update_status("正在处理...")
         
@@ -1224,7 +1500,7 @@ class MacOSAssistantUI(QMainWindow):
         # 如果存在上一个流式工作线程，停止它
         if hasattr(self, 'assistant_worker') and self.assistant_worker is not None:
             self.assistant_worker.stop()
-            self.assistant_worker.wait()
+            self.assistant_worker.wait(500)  # 等待最多500ms
         
         # 启动流式助手工作线程
         self.assistant_worker = StreamingAssistantWorker(self.assistant, text)
@@ -1249,8 +1525,25 @@ class MacOSAssistantUI(QMainWindow):
         if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
             self.current_assistant_bubble.stop_typing_indicator()
         
-        # 重新启用发送按钮
-        self.send_button.setEnabled(True)
+        # 恢复发送按钮状态
+        self.send_button.setText(" 发 送 ")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                font-weight: 600;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #0056CC;
+            }
+            QPushButton:pressed {
+                background-color: #004499;
+            }
+        """)
     
     def handle_stream_chunk(self, chunk):
         """处理流式文本块"""
@@ -1267,9 +1560,6 @@ class MacOSAssistantUI(QMainWindow):
         # 确保打字指示器被关闭
         if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
             self.current_assistant_bubble.stop_typing_indicator()
-        
-        # 重新启用发送按钮
-        self.send_button.setEnabled(True)
         
         # 如果启用了TTS，播放响应
         if self.tts_button.isChecked():
