@@ -122,7 +122,7 @@ class AudioWorker(QThread):
                         pass
                     self.microphone = None
                 
-                self.signals.status.emit("语音输入已暂停")
+                # self.signals.status.emit("语音输入已暂停")
                 time.sleep(0.5)
                 
             time.sleep(0.1)
@@ -669,6 +669,34 @@ class BreathingDotIndicator(QWidget):
             painter.drawEllipse(QPoint(x, y_center), radius, radius)
 
 class MacOSAssistantUI(QMainWindow):
+    WELCOME_MESSAGE = (
+        "# 🤖 macOS系统助手\n\n"
+        "欢迎使用macOS系统助手！我可以帮助您管理macOS系统。\n\n"
+        "## 🚀 主要功能\n\n"
+        "### 🔧 系统管理\n"
+        "- **系统信息查询** - 获取macOS版本、CPU、内存、磁盘使用情况\n"
+        "- **进程管理** - 查看正在运行的进程，按CPU使用率排序\n"
+        "- **网络监控** - 查看网络接口和连接状态\n"
+        "- **电池状态** - 获取电池电量和剩余时间\n"
+        "- **音量控制** - 设置系统音量\n\n"
+        "### 📱 应用程序管理\n"
+        "- **应用启动** - 打开系统内置和第三方应用程序\n"
+        "- **应用列表** - 查看已安装的应用程序\n"
+        "- **智能搜索** - 自动查找和启动应用程序\n\n"
+        "### 📁 文件操作\n"
+        "- **文件搜索** - 在指定目录中搜索文件\n"
+        "- **笔记创建** - 快速创建文本笔记文件\n"
+        "- **文件管理** - 基本的文件操作功能\n\n"
+        "### 💻 终端集成\n"
+        "- **命令执行** - 安全执行终端命令\n"
+        "- **系统控制** - 通过命令行控制macOS系统\n\n"
+        "## 💡 使用提示\n\n"
+        "- 试试点击左侧的**预设命令**\n"
+        "- 或者直接输入您的问题\n"
+        "- 支持语音输入和文字输入\n"
+        "- 助手回复支持Markdown格式\n\n"
+        "**开始您的macOS管理之旅吧！** 🎉"
+    )
     def __init__(self):
         super().__init__()
         self.setWindowTitle('macOS系统助手')
@@ -778,7 +806,8 @@ class MacOSAssistantUI(QMainWindow):
         api_key = "sk-1b53c98a3b8c4abcaa1f68540ab3252d"
         self.assistant = IntelligentMacOSAssistant(api_key)
         
-        # 创建UI
+        self.current_page = "chat"  # "chat" or "kb"
+        self.knowledge_base_container = None
         self.init_ui()
         
         # 对话状态
@@ -837,59 +866,58 @@ class MacOSAssistantUI(QMainWindow):
         main_layout.addWidget(self.main_content, 1)
         
         # 添加欢迎消息
-        welcome_message = """# 🤖 macOS系统助手
-
-欢迎使用macOS系统助手！我可以帮助您管理macOS系统。
-
-## 🚀 主要功能
-
-### 🔧 系统管理
-- **系统信息查询** - 获取macOS版本、CPU、内存、磁盘使用情况
-- **进程管理** - 查看正在运行的进程，按CPU使用率排序
-- **网络监控** - 查看网络接口和连接状态
-- **电池状态** - 获取电池电量和剩余时间
-- **音量控制** - 设置系统音量
-
-### 📱 应用程序管理
-- **应用启动** - 打开系统内置和第三方应用程序
-- **应用列表** - 查看已安装的应用程序
-- **智能搜索** - 自动查找和启动应用程序
-
-### 📁 文件操作
-- **文件搜索** - 在指定目录中搜索文件
-- **笔记创建** - 快速创建文本笔记文件
-- **文件管理** - 基本的文件操作功能
-
-### 💻 终端集成
-- **命令执行** - 安全执行终端命令
-- **系统控制** - 通过命令行控制macOS系统
-
-## 💡 使用提示
-
-- 试试点击左侧的**预设命令**
-- 或者直接输入您的问题
-- 支持语音输入和文字输入
-- 助手回复支持Markdown格式
-
-**开始您的macOS管理之旅吧！** 🎉"""
-        
-        self.add_message("助手", welcome_message)
+        self.add_message("助手", self.WELCOME_MESSAGE)
     
     def create_sidebar(self):
-        """创建左侧边栏"""
+        """
+        创建左侧边栏，顶部加入导航栏
+        """
         self.sidebar = QWidget()
-        self.sidebar.setFixedWidth(300)  # 增加边栏宽度
+        self.sidebar.setFixedWidth(300)
         self.sidebar.setStyleSheet("""
             QWidget {
                 background-color: #f8f9fa;
                 border-right: 1px solid #e5e5e5;
             }
         """)
-        
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(20, 20, 20, 20)  # 增加边距
+        sidebar_layout.setContentsMargins(20, 20, 20, 20)
         sidebar_layout.setSpacing(16)
-        
+
+        # ======= 新增导航栏 =======
+        nav_bar = QWidget()
+        nav_bar_layout = QHBoxLayout(nav_bar)
+        nav_bar_layout.setContentsMargins(0, 0, 0, 0)
+        nav_bar_layout.setSpacing(8)
+        self.chat_nav_btn = QPushButton("💬 对话")
+        self.kb_nav_btn = QPushButton("📚 知识库")
+        for btn in [self.chat_nav_btn, self.kb_nav_btn]:
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e3f2fd;
+                    color: #1976d2;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 15px;
+                    font-weight: 600;
+                    padding: 8px 18px;
+                }
+                QPushButton:checked {
+                    background-color: #1976d2;
+                    color: white;
+                }
+            """)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chat_nav_btn.setChecked(True)
+        self.chat_nav_btn.clicked.connect(self.switch_to_chat_page)
+        self.kb_nav_btn.clicked.connect(self.switch_to_kb_page)
+        nav_bar_layout.addWidget(self.chat_nav_btn)
+        nav_bar_layout.addWidget(self.kb_nav_btn)
+        nav_bar_layout.addStretch(1)
+        sidebar_layout.addWidget(nav_bar)
+        # ======= 导航栏结束 =======
+
         # 标题
         title_label = QLabel("macOS助手")
         title_label.setStyleSheet("""
@@ -976,25 +1004,90 @@ class MacOSAssistantUI(QMainWindow):
         sidebar_layout.addStretch()
     
     def create_main_content(self):
-        """创建主内容区域"""
+        """
+        创建主内容区，支持页面切换
+        """
         self.main_content = QWidget()
         self.main_content.setStyleSheet("""
             QWidget {
                 background-color: white;
             }
         """)
-        
-        main_layout = QVBoxLayout(self.main_content)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
-        # 聊天区域
-        self.create_chat_area()
-        main_layout.addWidget(self.chat_container, 1)
-        
-        # 输入区域
-        self.create_input_area()
-        main_layout.addWidget(self.input_container, 0)
+        self.main_layout = QVBoxLayout(self.main_content)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        self.refresh_main_content()
+
+    def refresh_main_content(self):
+        # 清空主内容区
+        while self.main_layout.count():
+            item = self.main_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+        if self.current_page == "chat":
+            self.create_chat_area()
+            self.main_layout.addWidget(self.chat_container, 1)
+            self.create_input_area()
+            self.main_layout.addWidget(self.input_container, 0)
+            # ====== 保证欢迎信息存在 ======
+            if hasattr(self, 'chat_layout') and self.chat_layout.count() == 1:
+                self.add_message("助手", self.WELCOME_MESSAGE)
+        elif self.current_page == "kb":
+            if not self.knowledge_base_container:
+                self.knowledge_base_container = self.create_knowledge_base_page()
+            self.main_layout.addWidget(self.knowledge_base_container, 1)
+
+    def switch_to_chat_page(self):
+        self.current_page = "chat"
+        self.chat_nav_btn.setChecked(True)
+        self.kb_nav_btn.setChecked(False)
+        self.refresh_main_content()
+
+    def switch_to_kb_page(self):
+        self.current_page = "kb"
+        self.chat_nav_btn.setChecked(False)
+        self.kb_nav_btn.setChecked(True)
+        self.refresh_main_content()
+
+    def create_knowledge_base_page(self):
+        kb_widget = QWidget()
+        kb_layout = QVBoxLayout(kb_widget)
+        kb_layout.setContentsMargins(32, 32, 32, 32)
+        kb_layout.setSpacing(18)
+        title = QLabel("📚 知识库")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1976d2; margin-bottom: 12px;")
+        kb_layout.addWidget(title)
+        desc = QLabel("这里可以展示您的知识库内容、FAQ、文档、快捷指令等。")
+        desc.setStyleSheet("font-size: 15px; color: #444; margin-bottom: 8px;")
+        kb_layout.addWidget(desc)
+        # 示例知识点列表
+        kb_list = QListWidget()
+        kb_list.setStyleSheet("""
+            QListWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QListWidget::item {
+                padding: 10px 16px;
+                border-radius: 4px;
+                margin: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+        """)
+        kb_list.addItem("如何使用macOS助手？")
+        kb_list.addItem("常见系统命令速查")
+        kb_list.addItem("快捷键大全")
+        kb_list.addItem("文件搜索技巧")
+        kb_list.addItem("更多内容即将上线...")
+        kb_layout.addWidget(kb_list, 1)
+        return kb_widget
     
     def create_chat_area(self):
         """创建聊天区域"""
@@ -1402,7 +1495,15 @@ class MacOSAssistantUI(QMainWindow):
         self.audio_worker.signals.error.connect(self.handle_error)
         self.audio_worker.signals.status.connect(self.update_status)
         self.audio_worker.start()
-        
+        # 启动后立即禁用语音输入
+        self.audio_worker.set_paused(True)
+        if hasattr(self, 'voice_input_button'):
+            self.voice_input_button.setChecked(False)
+        if hasattr(self, 'voice_input_status'):
+            self.voice_input_status.setText("已关闭")
+            self.voice_input_status.setStyleSheet("font-size: 13px; color: #dc3545; font-weight: 500;")
+        # 不主动更改主状态栏
+        # self.update_status("语音输入已禁用")
         # 启动TTS线程
         self.tts_worker = TTSWorker()
         self.tts_worker.signals.finished.connect(self.on_tts_finished)
@@ -1549,8 +1650,11 @@ class MacOSAssistantUI(QMainWindow):
         """处理流式文本块"""
         if hasattr(self, 'current_assistant_bubble') and self.current_assistant_bubble:
             self.current_assistant_bubble.append_text(chunk)
-            # 滚动到底部以显示最新内容
-            QTimer.singleShot(10, self.scroll_to_bottom)
+            # 仅当用户当前在底部时才自动滚动
+            scroll_bar = self.chat_area.verticalScrollBar()
+            at_bottom = (scroll_bar.value() >= scroll_bar.maximum() - 20)
+            if at_bottom:
+                QTimer.singleShot(10, self.scroll_to_bottom)
     
     def handle_assistant_response(self, response):
         """处理助手响应"""
@@ -1749,43 +1853,7 @@ class MacOSAssistantUI(QMainWindow):
                 child.widget().deleteLater()
         
         # 添加欢迎消息
-        welcome_message = """# 🤖 macOS系统助手
-
-欢迎使用macOS系统助手！我可以帮助您管理macOS系统。
-
-## 🚀 主要功能
-
-### 🔧 系统管理
-- **系统信息查询** - 获取macOS版本、CPU、内存、磁盘使用情况
-- **进程管理** - 查看正在运行的进程，按CPU使用率排序
-- **网络监控** - 查看网络接口和连接状态
-- **电池状态** - 获取电池电量和剩余时间
-- **音量控制** - 设置系统音量
-
-### 📱 应用程序管理
-- **应用启动** - 打开系统内置和第三方应用程序
-- **应用列表** - 查看已安装的应用程序
-- **智能搜索** - 自动查找和启动应用程序
-
-### 📁 文件操作
-- **文件搜索** - 在指定目录中搜索文件
-- **笔记创建** - 快速创建文本笔记文件
-- **文件管理** - 基本的文件操作功能
-
-### 💻 终端集成
-- **命令执行** - 安全执行终端命令
-- **系统控制** - 通过命令行控制macOS系统
-
-## 💡 使用提示
-
-- 试试点击左侧的**预设命令**
-- 或者直接输入您的问题
-- 支持语音输入和文字输入
-- 助手回复支持Markdown格式
-
-**开始您的macOS管理之旅吧！** 🎉"""
-        
-        self.add_message("助手", welcome_message)
+        self.add_message("助手", self.WELCOME_MESSAGE)
     
     def closeEvent(self, event):
         """关闭事件"""

@@ -10,6 +10,7 @@ import threading
 import time
 import re
 import enum
+import unicodedata
 
 # LangChain imports
 from langchain.agents import AgentExecutor, create_openai_tools_agent
@@ -89,33 +90,60 @@ CPU: {cpu_info.stdout.strip()}
     @staticmethod
     @tool
     def open_application(app_name: str) -> str:
-        """打开指定的应用程序"""
+        """增强：支持别名、拼音、英文、中文混输，模糊匹配"""
         try:
-            # 首先获取所有已安装的应用程序
+            import difflib
+            import unicodedata
+            # 获取所有已安装应用
             all_apps = MacOSTools._get_all_applications()
-            
             if not all_apps:
                 return "无法获取应用程序列表"
-            
-            # 智能匹配应用程序
-            matched_apps = MacOSTools._find_matching_apps(app_name, all_apps)
-            
-            if not matched_apps:
-                return f"未找到匹配的应用程序: {app_name}"
-            
-            # 如果找到多个匹配项，选择最佳匹配
-            best_match = matched_apps[0]
-            
-            # 打开应用程序
-            subprocess.run(['open', best_match['path']])
-            
-            if len(matched_apps) > 1:
-                # 如果有多个匹配项，提供建议
-                suggestions = [app['name'] for app in matched_apps[1:3]]  # 显示前3个匹配项
-                return f"已打开 {best_match['name']}。其他可能的匹配: {', '.join(suggestions)}"
-            else:
-                return f"已打开 {best_match['name']}"
-                
+            # 别名表
+            aliases = {
+                'safari': ['safari', '浏览器', 'web', 'sāfārī', 'sfl', '苹果浏览器'],
+                'chrome': ['chrome', 'google chrome', '谷歌浏览器', 'gǔgē', '谷歌', 'chromium'],
+                'finder': ['finder', '访达', '文件管理器', 'fǎngdá'],
+                'terminal': ['terminal', '终端', '命令行', 'zhōngduān'],
+                'wechat': ['wechat', '微信', 'wēixìn'],
+                'qq': ['qq', '腾讯qq', 'q q'],
+                'vscode': ['visual studio code', 'vscode', 'vs code', '代码编辑器'],
+                'notes': ['notes', '备忘录', '笔记'],
+                'music': ['music', '音乐', 'itunes'],
+                'photos': ['photos', '照片', '相册'],
+                'mail': ['mail', '邮件', '邮箱'],
+                'messages': ['messages', '信息', '短信'],
+                'calendar': ['calendar', '日历'],
+                'preview': ['preview', '预览'],
+                'appstore': ['app store', 'appstore', '应用商店'],
+                'reminders': ['reminders', '提醒事项'],
+                'calculator': ['calculator', '计算器'],
+                'sublime': ['sublime text', 'sublime', '文本编辑器'],
+                'bilibili': ['bilibili', 'b站', '哔哩哔哩'],
+                'alipay': ['alipay', '支付宝'],
+                'taobao': ['taobao', '淘宝'],
+                'jd': ['jd', '京东'],
+                'netflix': ['netflix', '网飞'],
+                'youtube': ['youtube', '油管'],
+            }
+            # 归一化
+            def norm(s):
+                return unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii').lower()
+            app_name_norm = norm(app_name)
+            # 先查别名
+            for key, alias_list in aliases.items():
+                if app_name_norm in [norm(a) for a in alias_list]:
+                    for app in all_apps:
+                        if norm(app['name']) == norm(key):
+                            subprocess.run(['open', app['path']])
+                            return f"已打开 {app['name']}"
+            # 模糊匹配
+            all_names = [app['name'] for app in all_apps]
+            matches = difflib.get_close_matches(app_name, all_names, n=1, cutoff=0.6)
+            if matches:
+                best = next(app for app in all_apps if app['name'] == matches[0])
+                subprocess.run(['open', best['path']])
+                return f"已打开 {best['name']}"
+            return f"未找到匹配的应用程序: {app_name}"
         except Exception as e:
             return f"打开应用程序失败: {str(e)}"
     
@@ -254,40 +282,27 @@ CPU: {cpu_info.stdout.strip()}
     @staticmethod
     @tool
     def execute_terminal_command(command: str) -> str:
-        """执行终端命令
-        
-        Args:
-            command: 要执行的终端命令
-            
-        Returns:
-            命令执行结果
-        """
+        """分步执行&&分割的命令，逐步捕获异常"""
         try:
-            # 安全检查
             dangerous_commands = [
-                "rm -rf", "dd if=", "> /dev/", ":(){ :|:& };:",  # fork炸弹
+                "rm -rf", "dd if=", "> /dev/", ":(){ :|:& };:",
                 "chmod -R 777 /", "mv / /dev/null"
             ]
-            
             for dc in dangerous_commands:
                 if dc in command:
                     return f"为安全起见，系统拒绝执行包含 '{dc}' 的命令。请确保您的命令是安全的。"
-            
-            # 正常执行命令 - 使用类变量R1增强器
-            if MacOSTools.r1_enhancer and MacOSTools.r1_enhancer.is_available:
-                # 使用R1增强器优化命令
-                optimized_command = MacOSTools.r1_enhancer.optimize_system_command(command)
-                if optimized_command != command:
-                    command = optimized_command
-            
-            # 执行命令并获取输出
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10)
-            output = result.stdout if result.stdout else ""
-            error = result.stderr if result.stderr else ""
-            
-            if error:
-                return f"命令输出:\n{output}\n\n错误输出:\n{error}"
-            return output
+            # 分步执行
+            steps = [c.strip() for c in command.split('&&') if c.strip()]
+            output = ""
+            for step in steps:
+                result = subprocess.run(step, shell=True, capture_output=True, text=True, timeout=10)
+                out = result.stdout if result.stdout else ""
+                err = result.stderr if result.stderr else ""
+                if err:
+                    output += f"命令: {step}\n错误: {err}\n"
+                    break
+                output += out
+            return output if output else "命令执行成功"
         except subprocess.TimeoutExpired:
             return "命令超时（执行时间超过10秒）"
         except Exception as e:
@@ -409,20 +424,25 @@ CPU: {cpu_info.stdout.strip()}
     @staticmethod
     @tool
     def create_note(content: str, filename: str = None) -> str:
-        """创建笔记文件"""
+        """创建笔记文件，自动创建父目录，支持~、绝对、相对路径"""
         try:
+            import os
             if not filename:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"note_{timestamp}.txt"
-            
-            # 确保文件路径在用户目录下
-            filepath = os.path.expanduser(f"~/Desktop/{filename}")
-            
+            # 展开~
+            filepath = os.path.expanduser(filename)
+            # 如果不是绝对路径，默认放桌面
+            if not os.path.isabs(filepath):
+                filepath = os.path.join(os.path.expanduser("~/Desktop"), filepath)
+            # 自动创建父目录
+            dirpath = os.path.dirname(filepath)
+            if not os.path.exists(dirpath):
+                os.makedirs(dirpath, exist_ok=True)
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(f"创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("=" * 50 + "\n")
                 f.write(content)
-            
             return f"笔记已创建: {filepath}"
         except Exception as e:
             return f"创建笔记失败: {str(e)}"
@@ -1332,13 +1352,25 @@ class IntelligentMacOSAssistant:
             
             # 4. 对于复杂任务，使用R1增强器生成高级执行计划
             enhanced_input = user_input
+            plan = None
             if self.use_r1_enhancement and complexity in [TaskComplexity.COMPLEX, TaskComplexity.ADVANCED]:
                 yield "【生成执行计划】\n"
                 plan = self.r1_enhancer.generate_advanced_plan(user_input)
                 if plan:
                     yield f"{plan}\n"
-                    # 构建增强后的输入，包含计划信息
                     enhanced_input = f"{user_input}\n\n[系统提示：参考以下执行计划]\n{plan}"
+            # 5. Planner架构下自动执行计划
+            if architecture == ArchitectureType.PLANNER and plan:
+                yield "【自动执行计划】\n"
+                exec_results = self.execute_plan(plan)
+                for idx, r in enumerate(exec_results, 1):
+                    yield f"步骤{idx}: {r['task']}\n调用工具: {r['tool']}\n参数: {r['params']}\n结果: {r['result']}\n\n"
+                yield "【计划执行完毕】\n"
+                full_response = "\n".join([str(r['result']) for r in exec_results])
+                # 6. 更新聊天历史
+                self.chat_history.append(HumanMessage(content=user_input))
+                self.chat_history.append(AIMessage(content=full_response))
+                return
             
             # 5. 执行流式响应
             buffer = []  # 用于存储收到的令牌
@@ -1574,11 +1606,25 @@ class IntelligentMacOSAssistant:
             
             # 4. 对于复杂任务，使用R1增强器生成高级执行计划
             enhanced_input = user_input
+            plan = None
             if self.use_r1_enhancement and complexity in [TaskComplexity.COMPLEX, TaskComplexity.ADVANCED]:
+                yield "【生成执行计划】\n"
                 plan = self.r1_enhancer.generate_advanced_plan(user_input)
                 if plan:
-                    # 构建增强后的输入，包含计划信息
+                    yield f"{plan}\n"
                     enhanced_input = f"{user_input}\n\n[系统提示：参考以下执行计划]\n{plan}"
+            # 5. Planner架构下自动执行计划
+            if architecture == ArchitectureType.PLANNER and plan:
+                yield "【自动执行计划】\n"
+                exec_results = self.execute_plan(plan)
+                for idx, r in enumerate(exec_results, 1):
+                    yield f"步骤{idx}: {r['task']}\n调用工具: {r['tool']}\n参数: {r['params']}\n结果: {r['result']}\n\n"
+                yield "【计划执行完毕】\n"
+                full_response = "\n".join([str(r['result']) for r in exec_results])
+                # 6. 更新聊天历史
+                self.chat_history.append(HumanMessage(content=user_input))
+                self.chat_history.append(AIMessage(content=full_response))
+                return
             
             # 5. 执行流式响应
             full_response = ""
@@ -1682,6 +1728,124 @@ class IntelligentMacOSAssistant:
             error_msg = f"处理请求时发生错误: {str(e)}"
             print(error_msg)
             yield error_msg
+
+    def map_task_to_tool(self, task_text: str):
+        """将自然语言任务映射到合适的tool及参数"""
+        # 关键词与tool映射表
+        mapping = [
+            (r"创建文件夹|新建文件夹|建立文件夹|mkdir", MacOSTools.execute_terminal_command, lambda t: {"command": f"mkdir -p '{self._extract_path(t)}'"}),
+            (r"写文件|创建文件|新建文件|保存内容", MacOSTools.execute_terminal_command, lambda t: {"command": f"echo '{self._extract_content(t)}' > '{self._extract_path(t)}'"}),
+            (r"打开应用|启动应用|运行应用|open", MacOSTools.open_application, lambda t: {"app_name": self._extract_app_name(t)}),
+            (r"网络信息|网络状态|网络连接|ip|ifconfig", MacOSTools.get_network_info, lambda t: {}),
+            (r"系统信息|系统状态|硬件信息", MacOSTools.get_system_info, lambda t: {}),
+            (r"电池信息|电量|电池状态", MacOSTools.get_battery_info, lambda t: {}),
+            (r"进程|运行程序|进程列表", MacOSTools.get_running_processes, lambda t: {}),
+            (r"搜索文件|查找文件|find|mdfind", MacOSTools.search_files, lambda t: {"query": self._extract_query(t)}),
+            (r"音量|设置音量|调整音量", MacOSTools.set_system_volume, lambda t: {"volume": self._extract_volume(t)}),
+            (r"当前时间|现在几点|时间", MacOSTools.get_current_time, lambda t: {}),
+            (r"已安装应用|应用列表|列出应用", MacOSTools.get_installed_applications, lambda t: {}),
+            (r"创建笔记|写笔记|保存笔记", MacOSTools.create_note, lambda t: {"content": self._extract_content(t)}),
+        ]
+        for pattern, tool, param_fn in mapping:
+            if re.search(pattern, task_text, re.I):
+                try:
+                    params = param_fn(task_text)
+                except Exception:
+                    params = {}
+                return tool, params
+        # 默认尝试用终端命令
+        return MacOSTools.execute_terminal_command, {"command": task_text}
+
+    def _extract_path(self, text):
+        # 简单提取路径
+        m = re.search(r"(?:到|在|于|到达)?([~/\w\-./]+)", text)
+        return m.group(1) if m else "~/Desktop/auto_folder"
+    def _extract_content(self, text):
+        m = re.search(r"内容为([\s\S]+)", text)
+        return m.group(1).strip() if m else "自动生成内容"
+    def _extract_app_name(self, text):
+        m = re.search(r"打开(.*?)(?:应用|$)", text)
+        return m.group(1).strip() if m else text.strip()
+    def _extract_query(self, text):
+        m = re.search(r"搜索(.*?)(?:文件|$)", text)
+        return m.group(1).strip() if m else text.strip()
+    def _extract_volume(self, text):
+        m = re.search(r"(\d{1,3})%?", text)
+        try:
+            v = int(m.group(1))
+            return min(max(v, 0), 100)
+        except:
+            return 50
+
+    def llm_map_task_to_tool(self, task_text: str):
+        """优先用LLM做mapping，失败时fallback到原有mapping"""
+        prompt = f"""
+你有如下工具可用：
+1. open_application(app_name)
+2. execute_terminal_command(command)
+3. create_note(content, filename)
+4. get_network_info()
+5. get_system_info()
+6. get_battery_info()
+7. get_running_processes()
+8. search_files(query)
+9. set_system_volume(volume)
+10. get_current_time()
+11. get_installed_applications()
+用户请求：{task_text}
+请判断应该调用哪个工具，并给出参数，返回JSON格式：{{"tool": "...", "params": {{...}}}}
+"""
+        try:
+            result = self.llm.invoke(prompt)
+            data = json.loads(result.content)
+            tool = getattr(MacOSTools, data["tool"])
+            params = data["params"]
+            return tool, params
+        except Exception:
+            return self.map_task_to_tool(task_text)
+
+    def execute_plan(self, plan_text: str):
+        """支持LLM结构化tool序列和普通文本计划"""
+        # 1. 优先尝试LLM结构化输出
+        plan_prompt = f"""
+用户请求：{plan_text}
+请将任务分解为一系列工具调用，输出JSON数组，每个元素形如：{{"tool": "...", "params": {{...}}}}
+"""
+        try:
+            result = self.llm.invoke(plan_prompt)
+            plan_data = json.loads(result.content)
+            if isinstance(plan_data, list):
+                results = []
+                for step in plan_data:
+                    tool = getattr(MacOSTools, step["tool"], None)
+                    params = step.get("params", {})
+                    if tool:
+                        try:
+                            res = tool(**params)
+                        except Exception as e:
+                            res = f"工具调用失败: {str(e)}"
+                        results.append({"task": step, "tool": tool.__name__, "params": params, "result": res})
+                return results
+        except Exception:
+            pass
+        # fallback到原有文本解析
+        tasks = self._parse_plan_to_tasks(plan_text)
+        results = []
+        for task in tasks:
+            tool, params = self.llm_map_task_to_tool(task)
+            try:
+                result = tool(**params)
+            except Exception as e:
+                result = f"工具调用失败: {str(e)}"
+            results.append({"task": task, "tool": tool.__name__, "params": params, "result": result})
+        return results
+
+    def _parse_plan_to_tasks(self, plan_text: str):
+        """简单按行/序号/分段提取子任务"""
+        # 支持1. 2. 3.、-、●、换行等
+        lines = re.split(r"\n|\d+\. |\-|●|\u2022", plan_text)
+        tasks = [l.strip() for l in lines if l.strip() and len(l.strip()) > 3]
+        return tasks
 
 # 保留原始的MacOSAssistant类以向后兼容
 class MacOSAssistant:
