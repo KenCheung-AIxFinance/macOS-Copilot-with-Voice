@@ -143,7 +143,7 @@ CPU: {cpu_info.stdout.strip()}
                 best = next(app for app in all_apps if app['name'] == matches[0])
                 subprocess.run(['open', best['path']])
                 return f"已打开 {best['name']}"
-            return f"未找到匹配的应用程序: {app_name}"
+                return f"未找到匹配的应用程序: {app_name}"
         except Exception as e:
             return f"打开应用程序失败: {str(e)}"
     

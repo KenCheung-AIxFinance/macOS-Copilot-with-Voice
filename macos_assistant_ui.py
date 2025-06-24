@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QTextEdit, QPushButton, QLabel, QFrame,
                             QScrollArea, QSplitter, QListWidget, QListWidgetItem,
-                            QTextBrowser, QSizePolicy)
+                            QTextBrowser, QSizePolicy, QLineEdit, QMenu, QTabWidget)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QPropertyAnimation, QEasingCurve, QPoint, QRectF, pyqtProperty
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QTextCursor, QTextOption, QBrush, QPen, QPainter, QPainterPath
 import speech_recognition as sr
@@ -808,6 +808,12 @@ class MacOSAssistantUI(QMainWindow):
         
         self.current_page = "chat"  # "chat" or "kb"
         self.knowledge_base_container = None
+        self.knowledge_base_list = [
+            {"title": "如何使用macOS助手？", "content": "您可以在左侧输入问题或点击预设命令，助手会自动为您解答。"},
+            {"title": "常见系统命令速查", "content": "如：查看系统信息、打开应用、搜索文件等。"},
+            {"title": "快捷键大全", "content": "Cmd+C 复制，Cmd+V 粘贴，Cmd+Space Spotlight搜索等。"},
+            {"title": "文件搜索技巧", "content": "可用助手的'搜索文件'功能，支持模糊匹配。"},
+        ]
         self.init_ui()
         
         # 对话状态
@@ -884,7 +890,7 @@ class MacOSAssistantUI(QMainWindow):
         sidebar_layout.setContentsMargins(20, 20, 20, 20)
         sidebar_layout.setSpacing(16)
 
-        # ======= 新增导航栏 =======
+        # ======= 新增導航欄 =======
         nav_bar = QWidget()
         nav_bar_layout = QHBoxLayout(nav_bar)
         nav_bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -916,8 +922,8 @@ class MacOSAssistantUI(QMainWindow):
         nav_bar_layout.addWidget(self.kb_nav_btn)
         nav_bar_layout.addStretch(1)
         sidebar_layout.addWidget(nav_bar)
-        # ======= 导航栏结束 =======
-
+        # ======= 導航欄結束 =======
+        
         # 标题
         title_label = QLabel("macOS助手")
         title_label.setStyleSheet("""
@@ -1019,7 +1025,7 @@ class MacOSAssistantUI(QMainWindow):
         self.refresh_main_content()
 
     def refresh_main_content(self):
-        # 清空主内容区
+        # 清空主內容區
         while self.main_layout.count():
             item = self.main_layout.takeAt(0)
             w = item.widget()
@@ -1030,13 +1036,13 @@ class MacOSAssistantUI(QMainWindow):
             self.main_layout.addWidget(self.chat_container, 1)
             self.create_input_area()
             self.main_layout.addWidget(self.input_container, 0)
-            # ====== 保证欢迎信息存在 ======
+            # ====== 保證歡迎信息存在 ======
             if hasattr(self, 'chat_layout') and self.chat_layout.count() == 1:
                 self.add_message("助手", self.WELCOME_MESSAGE)
         elif self.current_page == "kb":
-            if not self.knowledge_base_container:
-                self.knowledge_base_container = self.create_knowledge_base_page()
-            self.main_layout.addWidget(self.knowledge_base_container, 1)
+            if not hasattr(self, 'knowledge_base_tab_container') or self.knowledge_base_tab_container is None:
+                self.knowledge_base_tab_container = self.create_knowledge_base_tab_page()
+            self.main_layout.addWidget(self.knowledge_base_tab_container, 1)
 
     def switch_to_chat_page(self):
         self.current_page = "chat"
@@ -1058,12 +1064,15 @@ class MacOSAssistantUI(QMainWindow):
         title = QLabel("📚 知识库")
         title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1976d2; margin-bottom: 12px;")
         kb_layout.addWidget(title)
-        desc = QLabel("这里可以展示您的知识库内容、FAQ、文档、快捷指令等。")
-        desc.setStyleSheet("font-size: 15px; color: #444; margin-bottom: 8px;")
-        kb_layout.addWidget(desc)
-        # 示例知识点列表
-        kb_list = QListWidget()
-        kb_list.setStyleSheet("""
+        # 添加知识按钮
+        add_btn = QPushButton("➕ 添加知识")
+        add_btn.setStyleSheet("font-size: 14px; padding: 6px 18px; border-radius: 8px; background:#e3f2fd; color:#1976d2; font-weight:600;")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(self.show_add_knowledge_dialog)
+        kb_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        # 知识点列表
+        self.kb_list_widget = QListWidget()
+        self.kb_list_widget.setStyleSheet("""
             QListWidget {
                 background-color: #f8f9fa;
                 border: 1px solid #e5e5e5;
@@ -1081,13 +1090,87 @@ class MacOSAssistantUI(QMainWindow):
                 color: #1976d2;
             }
         """)
-        kb_list.addItem("如何使用macOS助手？")
-        kb_list.addItem("常见系统命令速查")
-        kb_list.addItem("快捷键大全")
-        kb_list.addItem("文件搜索技巧")
-        kb_list.addItem("更多内容即将上线...")
-        kb_layout.addWidget(kb_list, 1)
+        for item in self.knowledge_base_list:
+            self.kb_list_widget.addItem(item["title"])
+        self.kb_list_widget.itemClicked.connect(self.show_knowledge_detail)
+        self.kb_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.kb_list_widget.customContextMenuRequested.connect(self.kb_context_menu)
+        kb_layout.addWidget(self.kb_list_widget, 1)
+        # 知识详情区
+        self.kb_detail_label = QTextEdit()
+        self.kb_detail_label.setReadOnly(True)
+        self.kb_detail_label.setStyleSheet("font-size:15px; color:#444; background:#fff; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_detail_label, 0)
+        # --- LLM知识库问答 ---
+        ask_row = QHBoxLayout()
+        self.kb_ask_input = QLineEdit()
+        self.kb_ask_input.setPlaceholderText("向知识库提问...")
+        self.kb_ask_input.setStyleSheet("font-size:14px; border-radius:8px; padding:8px 12px; border:1px solid #e5e5e5;")
+        ask_btn = QPushButton("🔍 提问")
+        ask_btn.setStyleSheet("font-size:14px; padding:8px 18px; border-radius:8px; background:#1976d2; color:white; font-weight:600;")
+        ask_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ask_btn.clicked.connect(self.ask_knowledge_base)
+        ask_row.addWidget(self.kb_ask_input, 1)
+        ask_row.addWidget(ask_btn, 0)
+        kb_layout.addLayout(ask_row)
+        self.kb_answer_label = QTextEdit()
+        self.kb_answer_label.setReadOnly(True)
+        self.kb_answer_label.setStyleSheet("font-size:15px; color:#1976d2; background:#f8f9fa; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_answer_label, 0)
         return kb_widget
+    def show_knowledge_detail(self, item):
+        idx = self.kb_list_widget.row(item)
+        if 0 <= idx < len(self.knowledge_base_list):
+            detail = self.knowledge_base_list[idx]["content"]
+            self.kb_detail_label.setPlainText(detail)
+    def kb_context_menu(self, pos):
+        item = self.kb_list_widget.itemAt(pos)
+        if item:
+            idx = self.kb_list_widget.row(item)
+            menu = QMenu()
+            del_action = menu.addAction("删除该知识点")
+            action = menu.exec(self.kb_list_widget.mapToGlobal(pos))
+            if action == del_action:
+                self.remove_knowledge_item(idx)
+    def show_add_knowledge_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QTextEdit, QPushButton, QLabel
+        dialog = QDialog(self)
+        dialog.setWindowTitle("添加知识点")
+        layout = QVBoxLayout(dialog)
+        title_input = QLineEdit()
+        title_input.setPlaceholderText("知识标题")
+        content_input = QTextEdit()
+        content_input.setPlaceholderText("知识内容")
+        add_btn = QPushButton("添加")
+        add_btn.setStyleSheet("font-size:14px; padding:8px 18px; border-radius:8px; background:#1976d2; color:white; font-weight:600;")
+        def on_add():
+            title = title_input.text().strip()
+            content = content_input.toPlainText().strip()
+            if title and content:
+                self.add_knowledge_item(title, content)
+                dialog.accept()
+        add_btn.clicked.connect(on_add)
+        layout.addWidget(QLabel("标题："))
+        layout.addWidget(title_input)
+        layout.addWidget(QLabel("内容："))
+        layout.addWidget(content_input)
+        layout.addWidget(add_btn)
+        dialog.setLayout(layout)
+        dialog.exec()
+    def ask_knowledge_base(self):
+        question = self.kb_ask_input.text().strip()
+        if not question:
+            self.kb_answer_label.setPlainText("请输入您的问题。")
+            return
+        kb_text = "\n".join([f"{i+1}. {item['title']}: {item['content']}" for i, item in enumerate(self.knowledge_base_list)])
+        prompt = f"已知知识库如下：\n{kb_text}\n用户问题：{question}\n请结合知识库内容用中文简明回答。"
+        self.kb_answer_label.setPlainText("AI正在思考...")
+        try:
+            result = self.assistant.llm.invoke(prompt)
+            answer = result.content.strip()
+            self.kb_answer_label.setPlainText(answer)
+        except Exception as e:
+            self.kb_answer_label.setPlainText(f"AI回答失败: {str(e)}")
     
     def create_chat_area(self):
         """创建聊天区域"""
@@ -1941,6 +2024,268 @@ class MacOSAssistantUI(QMainWindow):
                         self.complexity_status.setStyleSheet(f"font-size: 13px; color: {complexity_color}; font-weight: 500;")
         except Exception as e:
             print(f"更新智能指标错误: {str(e)}")
+
+    # --- 知识库管理方法 ---
+    def add_knowledge_item(self, title, content):
+        self.knowledge_base_list.append({"title": title, "content": content})
+        if self.current_page == "kb":
+            self.refresh_main_content()
+    def remove_knowledge_item(self, index):
+        if 0 <= index < len(self.knowledge_base_list):
+            del self.knowledge_base_list[index]
+            if self.current_page == "kb":
+                self.refresh_main_content()
+    def get_knowledge_items(self):
+        return self.knowledge_base_list
+    # --- 知识库UI ---
+    def create_knowledge_base_page(self):
+        kb_widget = QWidget()
+        kb_layout = QVBoxLayout(kb_widget)
+        kb_layout.setContentsMargins(32, 32, 32, 32)
+        kb_layout.setSpacing(18)
+        title = QLabel("📚 知识库")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1976d2; margin-bottom: 12px;")
+        kb_layout.addWidget(title)
+        # 添加知识按钮
+        add_btn = QPushButton("➕ 添加知识")
+        add_btn.setStyleSheet("font-size: 14px; padding: 6px 18px; border-radius: 8px; background:#e3f2fd; color:#1976d2; font-weight:600;")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(self.show_add_knowledge_dialog)
+        kb_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        # 知识点列表
+        self.kb_list_widget = QListWidget()
+        self.kb_list_widget.setStyleSheet("""
+            QListWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QListWidget::item {
+                padding: 10px 16px;
+                border-radius: 4px;
+                margin: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+        """)
+        for item in self.knowledge_base_list:
+            self.kb_list_widget.addItem(item["title"])
+        self.kb_list_widget.itemClicked.connect(self.show_knowledge_detail)
+        self.kb_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.kb_list_widget.customContextMenuRequested.connect(self.kb_context_menu)
+        kb_layout.addWidget(self.kb_list_widget, 1)
+        # 知识详情区
+        self.kb_detail_label = QTextEdit()
+        self.kb_detail_label.setReadOnly(True)
+        self.kb_detail_label.setStyleSheet("font-size:15px; color:#444; background:#fff; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_detail_label, 0)
+        # --- LLM知识库问答 ---
+        ask_row = QHBoxLayout()
+        self.kb_ask_input = QLineEdit()
+        self.kb_ask_input.setPlaceholderText("向知识库提问...")
+        self.kb_ask_input.setStyleSheet("font-size:14px; border-radius:8px; padding:8px 12px; border:1px solid #e5e5e5;")
+        ask_btn = QPushButton("🔍 提问")
+        ask_btn.setStyleSheet("font-size:14px; padding:8px 18px; border-radius:8px; background:#1976d2; color:white; font-weight:600;")
+        ask_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ask_btn.clicked.connect(self.ask_knowledge_base)
+        ask_row.addWidget(self.kb_ask_input, 1)
+        ask_row.addWidget(ask_btn, 0)
+        kb_layout.addLayout(ask_row)
+        self.kb_answer_label = QTextEdit()
+        self.kb_answer_label.setReadOnly(True)
+        self.kb_answer_label.setStyleSheet("font-size:15px; color:#1976d2; background:#f8f9fa; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_answer_label, 0)
+        return kb_widget
+    def show_knowledge_detail(self, item):
+        idx = self.kb_list_widget.row(item)
+        if 0 <= idx < len(self.knowledge_base_list):
+            detail = self.knowledge_base_list[idx]["content"]
+            self.kb_detail_label.setPlainText(detail)
+    def kb_context_menu(self, pos):
+        item = self.kb_list_widget.itemAt(pos)
+        if item:
+            idx = self.kb_list_widget.row(item)
+            menu = QMenu()
+            del_action = menu.addAction("删除该知识点")
+            action = menu.exec(self.kb_list_widget.mapToGlobal(pos))
+            if action == del_action:
+                self.remove_knowledge_item(idx)
+    def show_add_knowledge_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QTextEdit, QPushButton, QLabel
+        dialog = QDialog(self)
+        dialog.setWindowTitle("添加知识点")
+        layout = QVBoxLayout(dialog)
+        title_input = QLineEdit()
+        title_input.setPlaceholderText("知识标题")
+        content_input = QTextEdit()
+        content_input.setPlaceholderText("知识内容")
+        add_btn = QPushButton("添加")
+        add_btn.setStyleSheet("font-size:14px; padding:8px 18px; border-radius:8px; background:#1976d2; color:white; font-weight:600;")
+        def on_add():
+            title = title_input.text().strip()
+            content = content_input.toPlainText().strip()
+            if title and content:
+                self.add_knowledge_item(title, content)
+                dialog.accept()
+        add_btn.clicked.connect(on_add)
+        layout.addWidget(QLabel("标题："))
+        layout.addWidget(title_input)
+        layout.addWidget(QLabel("内容："))
+        layout.addWidget(content_input)
+        layout.addWidget(add_btn)
+        dialog.setLayout(layout)
+        dialog.exec()
+    def ask_knowledge_base(self):
+        question = self.kb_ask_input.text().strip()
+        if not question:
+            self.kb_answer_label.setPlainText("请输入您的问题。")
+            return
+        kb_text = "\n".join([f"{i+1}. {item['title']}: {item['content']}" for i, item in enumerate(self.knowledge_base_list)])
+        prompt = f"已知知识库如下：\n{kb_text}\n用户问题：{question}\n请结合知识库内容用中文简明回答。"
+        self.kb_answer_label.setPlainText("AI正在思考...")
+        try:
+            result = self.assistant.llm.invoke(prompt)
+            answer = result.content.strip()
+            self.kb_answer_label.setPlainText(answer)
+        except Exception as e:
+            self.kb_answer_label.setPlainText(f"AI回答失败: {str(e)}")
+
+    # --- 知識庫管理頁 ---
+    def create_knowledge_base_manage_page(self):
+        kb_widget = QWidget()
+        kb_layout = QVBoxLayout(kb_widget)
+        kb_layout.setContentsMargins(32, 32, 32, 32)
+        kb_layout.setSpacing(18)
+        title = QLabel("📚 知识库管理")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1976d2; margin-bottom: 12px;")
+        kb_layout.addWidget(title)
+        add_btn = QPushButton("➕ 添加知识")
+        add_btn.setStyleSheet("font-size: 14px; padding: 6px 18px; border-radius: 8px; background:#e3f2fd; color:#1976d2; font-weight:600;")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(self.show_add_knowledge_dialog)
+        kb_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self.kb_manage_list_widget = QListWidget()
+        self.kb_manage_list_widget.setStyleSheet("""
+            QListWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QListWidget::item {
+                padding: 10px 16px;
+                border-radius: 4px;
+                margin: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+        """)
+        for item in self.knowledge_base_list:
+            self.kb_manage_list_widget.addItem(item["title"])
+        self.kb_manage_list_widget.itemClicked.connect(self.show_knowledge_detail_manage)
+        self.kb_manage_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.kb_manage_list_widget.customContextMenuRequested.connect(self.kb_manage_context_menu)
+        kb_layout.addWidget(self.kb_manage_list_widget, 1)
+        self.kb_manage_detail_label = QTextEdit()
+        self.kb_manage_detail_label.setReadOnly(True)
+        self.kb_manage_detail_label.setStyleSheet("font-size:15px; color:#444; background:#fff; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_manage_detail_label, 0)
+        return kb_widget
+    def show_knowledge_detail_manage(self, item):
+        idx = self.kb_manage_list_widget.row(item)
+        if 0 <= idx < len(self.knowledge_base_list):
+            detail = self.knowledge_base_list[idx]["content"]
+            self.kb_manage_detail_label.setPlainText(detail)
+    def kb_manage_context_menu(self, pos):
+        item = self.kb_manage_list_widget.itemAt(pos)
+        if item:
+            idx = self.kb_manage_list_widget.row(item)
+            menu = QMenu()
+            del_action = menu.addAction("删除该知识点")
+            action = menu.exec(self.kb_manage_list_widget.mapToGlobal(pos))
+            if action == del_action:
+                self.remove_knowledge_item(idx)
+
+    # --- 知識庫檢索頁 ---
+    def create_knowledge_base_search_page(self):
+        kb_widget = QWidget()
+        kb_layout = QVBoxLayout(kb_widget)
+        kb_layout.setContentsMargins(32, 32, 32, 32)
+        kb_layout.setSpacing(18)
+        title = QLabel("🔍 知识库检索")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1976d2; margin-bottom: 12px;")
+        kb_layout.addWidget(title)
+        ask_row = QHBoxLayout()
+        self.kb_search_input = QLineEdit()
+        self.kb_search_input.setPlaceholderText("请输入检索内容或提问...")
+        self.kb_search_input.setStyleSheet("font-size:14px; border-radius:8px; padding:8px 12px; border:1px solid #e5e5e5; color:#222;")
+        ask_btn = QPushButton("🔍 检索/提问")
+        ask_btn.setStyleSheet("font-size:14px; padding:8px 18px; border-radius:8px; background:#1976d2; color:white; font-weight:600;")
+        ask_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ask_btn.clicked.connect(self.ask_knowledge_base_search)
+        ask_row.addWidget(self.kb_search_input, 1)
+        ask_row.addWidget(ask_btn, 0)
+        kb_layout.addLayout(ask_row)
+        self.kb_search_answer_label = QTextEdit()
+        self.kb_search_answer_label.setReadOnly(True)
+        self.kb_search_answer_label.setStyleSheet("font-size:15px; color:#1976d2; background:#f8f9fa; border-radius:8px; padding:12px;")
+        kb_layout.addWidget(self.kb_search_answer_label, 1)
+        return kb_widget
+    def ask_knowledge_base_search(self):
+        question = self.kb_search_input.text().strip()
+        if not question:
+            self.kb_search_answer_label.setPlainText("请输入您的问题或检索内容。")
+            return
+        kb_text = "\n".join([f"{i+1}. {item['title']}: {item['content']}" for i, item in enumerate(self.knowledge_base_list)])
+        prompt = f"已知知识库如下：\n{kb_text}\n用户问题：{question}\n请结合知识库内容用中文简明回答。"
+        self.kb_search_answer_label.setPlainText("AI正在思考...")
+        try:
+            result = self.assistant.llm.invoke(prompt)
+            answer = result.content.strip()
+            self.kb_search_answer_label.setPlainText(answer)
+        except Exception as e:
+            self.kb_search_answer_label.setPlainText(f"AI回答失败: {str(e)}")
+
+    # --- 知識庫Tab主頁 ---
+    def create_knowledge_base_tab_page(self):
+        from PyQt6.QtWidgets import QTabWidget
+        tab_widget = QTabWidget()
+        tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #e5e5e5; border-radius: 8px; }
+            QTabBar::tab {
+                background: #f8f9fa;
+                color: #1976d2;
+                border: 1px solid #e5e5e5;
+                border-bottom: none;
+                border-radius: 8px 8px 0 0;
+                min-width: 120px;
+                min-height: 36px;
+                font-size: 15px;
+                font-weight: 600;
+                margin-right: 4px;
+                padding: 8px 18px;
+            }
+            QTabBar::tab:selected {
+                background: #1976d2;
+                color: white;
+            }
+        """)
+        # 管理頁
+        manage_page = self.create_knowledge_base_manage_page()
+        # 檢索頁
+        search_page = self.create_knowledge_base_search_page()
+        tab_widget.addTab(search_page, "🔍 检索/问答")
+        tab_widget.addTab(manage_page, "📚 管理")
+        tab_widget.setCurrentIndex(0)  # 預設顯示檢索/問答
+        return tab_widget
 
 def main():
     app = QApplication(sys.argv)
