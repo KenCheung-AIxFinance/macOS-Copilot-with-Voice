@@ -71,7 +71,7 @@
 - ✅ 麦克风权限
 - ✅ 网络连接（AI API调用）
 
-### ⚡ 一键安装
+### ⚡ 安装与启动
 
 ```bash
 # 1. 克隆项目
@@ -83,21 +83,52 @@ pip install -r requirements.txt
 
 # 3. 配置API密钥
 export OPENAI_API_KEY="your-api-key-here"
-
-# 4. 启动应用
-python macos_assistant_ui.py
 ```
 
-### 🎯 两种使用模式
+### 🎯 运行方式
 
-**图形界面模式（推荐）**
+**方法1: 使用主入口文件（推荐）**
 ```bash
-python macos_assistant_ui.py
+# 直接运行
+python run_copilot.py
+
+# 或者使用执行权限运行
+chmod +x run_copilot.py
+./run_copilot.py
 ```
 
-**命令行模式**
+**方法2: 使用命令行参数**
 ```bash
-python agent.py
+# 启用调试模式
+python run_copilot.py --debug
+
+# 设置自定义API密钥
+python run_copilot.py --api-key "your-api-key-here"
+```
+
+**方法3: 使用符号链接**
+```bash
+# 通过main.py运行（符号链接到run_copilot.py）
+python main.py
+```
+
+### 📚 项目结构
+```
+macOS-Copilot/
+├── run_copilot.py          # 主入口文件
+├── main.py                 # 符号链接到run_copilot.py
+├── requirements.txt        # 依赖项列表
+├── macOS_Copilot/          # 主包目录
+│   ├── agent/              # 代理模块
+│   │   ├── assistant.py    # 智能助手实现
+│   │   ├── streaming.py    # 流式处理
+│   │   └── types.py        # 类型定义
+│   ├── ui/                 # 用户界面模块
+│   │   ├── main_window.py  # 主窗口实现
+│   │   ├── chat/           # 聊天UI组件
+│   │   └── widgets/        # 自定义控件
+│   ├── models/             # 数据模型
+│   └── utils/              # 工具函数
 ```
 
 ---

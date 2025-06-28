@@ -45,7 +45,7 @@ def check_permissions():
 
 def main():
     """主函数"""
-    print("🤖 macOS系统助手")
+    print("🤖 macOS系统助手 (旧版)")
     print("=" * 50)
     
     # 检查依赖
@@ -54,6 +54,9 @@ def main():
     
     # 检查权限
     check_permissions()
+    
+    # 获取当前脚本所在目录
+    current_dir = os.path.dirname(os.path.abspath(__file__))
     
     print("\n请选择运行模式:")
     print("1. 命令行版本 (推荐用于测试)")
@@ -66,11 +69,15 @@ def main():
             
             if choice == "1":
                 print("\n🚀 启动命令行版本...")
-                os.system("python agent.py")
+                # 使用完整路径运行agent.py
+                agent_path = os.path.join(current_dir, "agent.py")
+                os.system(f"python \"{agent_path}\"")
                 break
             elif choice == "2":
                 print("\n🚀 启动图形界面版本...")
-                os.system("python macos_assistant_ui.py")
+                # 使用完整路径运行macos_assistant_ui.py
+                ui_path = os.path.join(current_dir, "macos_assistant_ui.py")
+                os.system(f"python \"{ui_path}\"")
                 break
             elif choice == "3":
                 print("👋 再见！")
