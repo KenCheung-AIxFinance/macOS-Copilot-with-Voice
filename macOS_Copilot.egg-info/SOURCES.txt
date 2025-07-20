@@ -1,7 +1,0 @@
-README.md
-setup.py
-macOS_Copilot.egg-info/PKG-INFO
-macOS_Copilot.egg-info/SOURCES.txt
-macOS_Copilot.egg-info/dependency_links.txt
-macOS_Copilot.egg-info/requires.txt
-macOS_Copilot.egg-info/top_level.txt
